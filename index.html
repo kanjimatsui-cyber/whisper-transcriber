@@ -5,6 +5,10 @@
   音声と文字起こしはブラウザ内で処理し、外部には送信しない設計。
   改訂 2.1: 明示的な言語指定、試験的な言語トークン検出、反復検出・再認識、base 推奨、60秒試験。
   自動検出と反復再認識の実機検証は未実施。
+  改訂 2.2: 初回認識の no_repeat_ngram を撤廃（再認識のみ 10）、空出力を正常扱い、無音判定を録音内ノイズ床基準に変更。
+  改訂 2.3: 空出力時に音声活動の有無を再検査し、有音候補のみ短区間で再認識。再び空なら要確認行を残す。再認識は1回のみ。
+  未検証: 2.3 の Safari 実機 Whisper 推論と精度比較。活動量判定は音量・継続時間に基づくヒューリスティックで、発話の確定判定ではない。
+  改訂 2.4: ビルド識別、話者表記・低密度の警告、任意区間試験、活動量ログ。Safari 実機未検証。
   言語チップは選択または検出した認識言語。無音判定は簡易 RMS 方式。
 -->
 <html lang="ja">
@@ -36,7 +40,10 @@ h2 {font-size:18px;margin:0 0 12px}
 p {margin:8px 0}
 .muted,small {color:var(--muted);font-size:12px}
 section {margin-top:22px;padding:18px;border:1px solid var(--line);background:var(--panel);border-radius:8px;min-width:0}
-button,select,textarea {font:inherit;color:inherit}
+button,select,textarea,input {font:inherit;color:inherit}
+#customRange input {width:100%;min-width:0;padding:8px;border:1px solid var(--line);background:var(--panel);border-radius:5px}
+.warning {color:var(--danger);font-size:11px;overflow-wrap:anywhere}
+.entry .warning {grid-column:2 / -1}
 button,select {min-height:42px;padding:7px 12px;border:1px solid var(--line);background:var(--panel);border-radius:5px}
 button {cursor:pointer;font-weight:500}
 button:disabled,select:disabled {opacity:.5;cursor:not-allowed}
@@ -80,7 +87,7 @@ textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;o
 <main>
 <header>
   <h1>音声文字起こし</h1>
-  <p class="muted">Safari 対応版</p>
+  <p class="muted">Safari 対応版 <strong id="build">2.4-20261119-r1</strong></p>
   <p class="muted">日本語・英語対応。音声は端末内で処理します。</p>
 </header>
 <section aria-labelledby="inputHeading">
@@ -105,11 +112,13 @@ textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;o
     </select></label>
   </div>
   <div class="fields"><label>実行方式<select id="execution"><option value="auto">自動（WebGPU 優先）</option><option value="wasm">互換性優先（WASM）</option></select></label><label>実行場所<select id="runner"><option value="worker">バックグラウンド（Worker）</option><option value="direct">直接実行（予備）</option></select></label></div>
-  <div class="fields"><label>処理範囲<select id="scope"><option value="full">音声全体</option><option value="60">最初の60秒だけ（精度確認）</option></select></label></div>
+  <div class="fields"><label>処理範囲<select id="scope"><option value="full">音声全体</option><option value="60">最初の60秒だけ（精度確認）</option><option value="custom">任意の時間範囲（精度確認）</option></select></label></div>
+  <div class="fields" id="customRange" hidden><label>開始時刻（分:秒）<input id="rangeStart" type="text" inputmode="text" value="10:30" placeholder="10:30"></label><label>終了時刻（分:秒）<input id="rangeEnd" type="text" inputmode="text" value="11:55" placeholder="11:55"></label></div>
   <p class="muted">日本語または英語を明示すると誤認識を減らせます。自動判定は最初の有音区間で言語を決めます。</p>
   <p id="compat" class="muted" role="status">iPhone では HTTPS の URL を Safari で開いてください。ファイルのプレビューでは動作しません。</p>
   <p id="backend" class="muted">実行時に WebGPU / WASM を判定します。</p>
   <div class="actions">
+    <button id="comparePreset" type="button">60秒・small の比較設定</button>
     <button id="start" class="primary" disabled>文字起こしを開始</button>
     <button id="stop" disabled>中止</button>
   </div>
@@ -121,14 +130,14 @@ textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;o
 </section>
 <section aria-labelledby="resultsHeading">
   <h2 id="resultsHeading">文字起こし結果</h2>
-  <div class="summary"><span>行数 <strong id="lines">0</strong></span><span>文字数 <strong id="chars">0</strong></span><span>英単語数 <strong id="words">0</strong></span></div>
+  <div class="summary"><span>行数 <strong id="lines">0</strong></span><span>警告行 <strong id="warnings">0</strong></span><span>文字数 <strong id="chars">0</strong></span><span>英単語数 <strong id="words">0</strong></span></div>
   <div class="actions" id="exports">
     <button data-export="copy">コピー</button><button data-export="share" hidden>共有・保存</button><button data-export="txt">TXT</button>
     <button data-export="md">MD</button><button data-export="csv">CSV</button>
     <button data-export="srt">SRT</button><button id="clear" class="danger">クリア</button>
   </div>
   <p id="saveState" class="muted" role="status">自動保存：確認中</p>
-  <small>各行を直接編集できます。要確認行は反復異常などで認識できなかった区間です。文字数は空白を除きます。</small>
+  <small>下書き専用。要確認が0でも正確性や話者の帰属は保証されません。音量は発話と雑音を区別できません。警告は原文を変更しません。文字数は空白を除きます。CSVにも警告を記録します。</small>
   <div id="log" class="log"></div><p id="empty">文字起こし結果はまだありません。</p>
 </section>
 </main>
@@ -138,6 +147,7 @@ function createEngine(send, cancelled = () => false, importer = url => import(ur
 const CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
 const MODELS = {tiny:'onnx-community/whisper-tiny',base:'onnx-community/whisper-base',small:'onnx-community/whisper-small',turbo:'onnx-community/whisper-large-v3-turbo'};
 const SR = 16000, WINDOW = 30*SR, SEARCH = 3*SR;
+let gate={rms:0.004,peak:0.01}; // calibrate() で録音ごとに更新
 const check = () => { if(cancelled()) throw new Error("cancelled"); };
 const yieldUI = () => new Promise(resolve=>setTimeout(resolve,0));
 const clamp = (x,a,b) => Math.max(a,Math.min(b,x));
@@ -163,13 +173,60 @@ function plan(a) {
   }
   return cuts;
 }
+// 録音全体の 20ms フレーム RMS から、ノイズ床（下位10%）と発話水準（上位95%）を求め、有音閾値を相対化する。
+function calibrate(a) {
+  const n=Math.floor(a.length/320);
+  if(n<10){gate={rms:0.004,peak:0.01};return gate;}
+  const f=new Float32Array(n);
+  for(let i=0;i<n;i++)f[i]=energy(a,i*320,i*320+320).rms;
+  f.sort();
+  const floor=f[Math.floor(n*0.10)], top=f[Math.min(n-1,Math.floor(n*0.95))];
+  const rms=Math.min(Math.max(0.0008,floor*2.5),Math.max(0.0008,top*0.5),0.01);
+  gate={rms,peak:rms*2.5};
+  return gate;
+}
 function silent(a,s,e) {
   let voiced=0;
   for(let p=s;p<e;p+=320) {
     const {rms,peak}=energy(a,p,Math.min(e,p+320));
-    if(rms>=0.004 && peak>=0.01 && ++voiced>=3) return false;
+    if(rms>=gate.rms && peak>=gate.peak && ++voiced>=3) return false;
   }
   return true;
+}
+// 空出力の再評価専用。20ms フレームの振幅・持続性を確認する。
+// 正確な音声区間検出(VAD)ではない。迷う場合は「音声候補」として扱い、欠落を見えるようにする。
+function speechCandidate(a,s,e) {
+  const step=320; // 20ms @16kHz
+  const threshold=Math.max(0.0008,Math.min(0.003,gate.rms*0.35));
+  let active=0, run=0, longest=0, highest=0, sum=0, frames=0;
+  for(let p=s;p<e;p+=step){
+    const {rms,peak}=energy(a,p,Math.min(p+step,e));
+    frames++;sum+=rms;highest=Math.max(highest,peak);
+    if(rms>=threshold && peak>=threshold*2){
+      active++;run++;longest=Math.max(longest,run);
+    }else run=0;
+  }
+  // 強い雑音でも活動と判定する可能性があるが、無根拠な欠落より要確認表示を優先する。
+  const candidate=(longest>=8 && active>=12) || (active>=20 && active>=frames*0.12);
+  const uncertain=!candidate && active>=3; // 短い返答を静音として捨てない
+  return {candidate,uncertain,active,frames,longest,rms:sum/Math.max(1,frames),peak:highest};
+}
+// 原区間より短く連続分割し、境界を最後の2秒の静音位置に寄せる。無限再試行しない。
+function shortCuts(a,s,e) {
+  const cuts=[];let left=s;
+  while(left<e){
+    let right=Math.min(left+10*SR,e);
+    if(right<e){
+      let best=Infinity,cut=right;
+      for(let pos=Math.max(left+SR,right-2*SR);pos<=right;pos+=320){
+        const rms=energy(a,Math.max(left,pos-800),Math.min(e,pos+800)).rms;
+        if(rms<=best){best=rms;cut=pos;}
+      }
+      right=cut;
+    }
+    cuts.push([left,right]);left=right;
+  }
+  return cuts;
 }
 function resultRows(output,start,end,lang) {
   const duration=end-start;
@@ -219,9 +276,43 @@ async function detectLanguage(pipe,samples) {
     throw new Error('日本語・英語を判定できません (token '+id+')');
   } finally {try{features.input_features?.dispose?.();}catch{}}
 }
-async function run({audio,model,language,execution}) {
-  check(); const cuts=plan(audio);send('plan',{total:cuts.length});
-  let pipe=null, device='wasm', stage='model', skipped=0, flagged=0, retried=0;
+// 警告は推論結果を変更せず、要校正の目印だけを付ける。
+function mark(row,reason){row.flags=[...new Set([...(row.flags||[]),reason])];}
+function annotate(a,s,e,rows){
+  const chars=t=>[...String(t).replace(/\s/gu,'')].length;
+  const signal=speechCandidate(a,s,e);
+  const activeSec=signal.active*0.02;
+  const count=rows.reduce((n,r)=>n+(r.text.startsWith('［要確認：')?0:chars(r.text)),0);
+  const density=activeSec?count/activeSec:0;
+  const common=/^(笑|笑い|拍手|咳|音楽|歓声|laughter|laughs?|applause|coughing|music)$/iu;
+  const checkGap=(from,to,row)=>{
+    if(to-from<8||!row)return;
+    const x=Math.max(s,Math.round(from*SR)),y=Math.min(e,Math.round(to*SR));
+    if(y-x<8*SR)return;
+    const activity=speechCandidate(a,x,y);
+    if(activity.candidate&&activity.active/Math.max(1,activity.frames)>=0.5)mark(row,'有音の空白（欠落の疑い）');
+  };
+  let cursor=s/SR,previous=null;
+  for(const row of rows){
+    const label=row.text.match(/^\s*[（(]([^）)]{1,24})[）)]/u);
+    if(label&&!common.test(label[1].trim()))mark(row,'話者・括弧表記（未確認）');
+    if(row.text.startsWith('［要確認：'))mark(row,'認識不良・空出力');
+    const duration=row.end-row.start;
+    if(duration>=8&&chars(row.text)/duration<2){
+      const x=Math.max(s,Math.round(row.start*SR)),y=Math.min(e,Math.round(row.end*SR));
+      if(y>x){const z=speechCandidate(a,x,y);if(z.candidate&&z.active/Math.max(1,z.frames)>=0.5)mark(row,'低密度（欠落の疑い）');}
+    }
+    checkGap(cursor,row.start,previous||row);
+    if(row.end>=cursor){cursor=row.end;previous=row;}
+  }
+  checkGap(cursor,e/SR,previous);
+  if(activeSec>=8&&density<2&&rows.length&&signal.active/Math.max(1,signal.frames)>=0.5)mark(rows[0],'区間の低密度（欠落の疑い）');
+  return {activeSec,density,count};
+}
+async function run({audio,model,language,execution,offset=0}) {
+  check(); calibrate(audio); send('debug',{message:'有音閾値 rms='+gate.rms.toFixed(5)+' peak='+gate.peak.toFixed(5)});
+  const cuts=plan(audio);send('plan',{total:cuts.length});
+  let pipe=null, device='wasm', stage='model', skipped=0, flagged=0, retried=0, emptyRetried=0, emptyQuiet=0, warningCount=0;
   let resolved=language==='auto'?null:language;
   let library=null;
   async function release(){if(pipe){try{await pipe.dispose();}catch{}pipe=null;}}
@@ -264,7 +355,8 @@ async function run({audio,model,language,execution}) {
     check();
     if(model==='turbo'&&!gpu&&cuts.some(([s,e])=>!silent(audio,s,e))){send('failed',{stage:'gpu'});return;}
     async function recognize(samples,lang,strict=false) {
-      const options={task:'transcribe',language:lang,return_timestamps:true,chunk_length_s:0,do_sample:false,num_beams:1,no_repeat_ngram_size:strict?5:7,max_new_tokens:Math.min(440,Math.max(48,Math.ceil(samples.length/SR*14)+16))};
+      const options={task:'transcribe',language:lang,return_timestamps:true,chunk_length_s:0,do_sample:false,num_beams:1,max_new_tokens:Math.min(440,Math.max(48,Math.ceil(samples.length/SR*14)+16))};
+      if(strict)options.no_repeat_ngram_size=10; // 初回は制限なし。正当な反復を歪めないため、再認識のみ緩く適用
       try {return await pipe(samples,options);}
       catch(error){
         check();if(device!=='webgpu'||model==='turbo')throw error;
@@ -274,7 +366,7 @@ async function run({audio,model,language,execution}) {
     }
     for(let i=0;i<cuts.length;i++){
       await yieldUI();check();
-      const [s,e]=cuts[i];let rows=[];
+      const [s,e]=cuts[i];let rows=[],initialRaw=null;
       if(silent(audio,s,e))skipped++;
       else {
         if(!pipe){
@@ -290,29 +382,52 @@ async function run({audio,model,language,execution}) {
         }
         const output=await recognize(samples,resolved);
         check();rows=resultRows(output,s/SR,e/SR,resolved);
-        if(loopSuspect(output,rows)||!rows.length){
-          retried++;send('debug',{message:'区間 '+(i+1)+'：反復または空出力を検出。短い区間で再認識'});
-          rows=[];
-          // Retry in shorter, contiguous sub-windows with quiet boundaries.
-          let left=s;
-          while(left<e){
-            await yieldUI();check();
-            let right=Math.min(left+12*SR,e);
-            if(right<e){let best=Infinity,cut=right;for(let pos=right-2*SR;pos<=right;pos+=320){const rms=energy(audio,Math.max(left,pos-800),Math.min(e,pos+800)).rms;if(rms<=best){best=rms;cut=pos;}}right=cut;}
-            if(!silent(audio,left,right)){
-              const retry=await recognize(audio.subarray(left,right),resolved,true);
+        // 初回結果が空の場合でも、音量・持続時間を再評価し、発話候補なら再認識する。
+        const isEmpty=rows.length===0;
+        const isLoop=rows.length>0&&loopSuspect(output,rows);
+        if(isEmpty||isLoop){
+          const signal=isEmpty?speechCandidate(audio,s,e):null;
+          if(isEmpty&&!signal.candidate&&!signal.uncertain){
+            emptyQuiet++;
+            send('debug',{message:'区間 '+(i+1)+'：空出力。音声活動は少なく再認識を省略（RMS平均 '+signal.rms.toFixed(5)+'）'});
+          }else{
+            if(isEmpty){emptyRetried++;send('debug',{message:'区間 '+(i+1)+'：空出力だが音声候補'+(signal.uncertain?'（短音・不確実）':'')+'あり（活動 '+signal.active+'/'+signal.frames+' フレーム）。短区間で1回だけ再認識'});}
+            else{retried++;send('debug',{message:'区間 '+(i+1)+'：反復を検出。短区間で再認識'});}
+            initialRaw=String(output?.text||rows.map(r=>r.text).join(' '));
+            rows=[];
+            for(const [left,right] of shortCuts(audio,s,e)){
+              await yieldUI();check();
+              const evidence=speechCandidate(audio,left,right);
+              if(!evidence.candidate&&!evidence.uncertain){
+                send('debug',{message:'再認識区間 '+(left/SR).toFixed(1)+'–'+(right/SR).toFixed(1)+'秒：音声活動は少ないため省略'});
+                continue;
+              }
+              // 空出力の再認識は自然な繰り返しを抑止しない。反復異常のみ strict を適用。
+              const retry=await recognize(audio.subarray(left,right),resolved,isLoop);
+              check();
               const candidate=resultRows(retry,left/SR,right/SR,resolved);
-              if(loopSuspect(retry,candidate)||!candidate.length){
-                flagged++;rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：認識不良］',raw:String(retry?.text||candidate.map(r=>r.text).join(' '))});
-              } else rows.push(...candidate);
+              if(!candidate.length){
+                flagged++;
+                rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：音声候補あり・文字起こしなし］'});
+                send('debug',{message:'再認識区間 '+(left/SR).toFixed(1)+'–'+(right/SR).toFixed(1)+'秒：再度空出力。要確認行を記録'});
+              }else if(loopSuspect(retry,candidate)){
+                flagged++;
+                rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：認識不良］',raw:String(retry?.text||candidate.map(r=>r.text).join(' '))});
+              }else rows.push(...candidate);
             }
-            left=right;
+            if(!rows.length){flagged++;rows.push({start:s/SR,end:e/SR,lang:resolved.toUpperCase(),text:'［要確認：再認識で結果なし］'});}
+            rows[0].initialRaw=initialRaw;
+            mark(rows[0],'再認識済み（原音確認）');
           }
         }
       }
-      send('chunk',{rows,done:i+1,total:cuts.length,skipped,flagged,retried});
+      const metrics=annotate(audio,s,e,rows);
+      warningCount+=rows.filter(r=>r.flags?.length).length;
+      send('debug',{message:'区間 '+(i+1)+' '+(s/SR+offset).toFixed(1)+'–'+(e/SR+offset).toFixed(1)+'秒 / 活動 '+metrics.activeSec.toFixed(1)+'秒 / '+metrics.count+'文字 / '+metrics.density.toFixed(2)+'文字/活動秒'});
+      for(const r of rows){r.start+=offset;r.end+=offset;}
+      send('chunk',{rows,done:i+1,total:cuts.length,skipped,flagged,retried,emptyRetried,emptyQuiet,warningCount});
     }
-    send('complete',{skipped,total:cuts.length,flagged,retried});
+    send('complete',{skipped,total:cuts.length,flagged,retried,emptyRetried,emptyQuiet,warningCount});
   }catch(error){
     const message=String(error?.message??error);
     const memory=/out of memory|allocat|memory access|buffer size|device lost/i.test(message);
@@ -327,10 +442,12 @@ return {run};
 'use strict';
 const $=id=>document.getElementById(id);
 const KEY='local-whisper-transcript-v1';
+const BUILD='2.4-20261119-r1';
+$('build').textContent=BUILD;
 let selected=null,active=null,rows=[],sourceName='',clearTimer=null,clearDeadline=0,saveTimer=null;
 let storageOK=true,cacheWarning=false;
 const traceLines=[];
-function trace(message){traceLines.push(new Date().toLocaleTimeString('ja-JP')+' '+String(message));if(traceLines.length>80)traceLines.shift();$('trace').textContent=traceLines.join('\n');}
+function trace(message){traceLines.push(new Date().toLocaleTimeString('ja-JP')+' '+String(message));if(traceLines.length>400)traceLines.shift();$('trace').textContent='BUILD '+BUILD+'\n'+traceLines.join('\n');}
 window.addEventListener('error',e=>{trace('JavaScript: '+(e.message||'読み込みエラー'));$('diagnostic').open=true;});
 window.addEventListener('unhandledrejection',e=>{trace('非同期エラー: '+String(e.reason?.message??e.reason));$('diagnostic').open=true;});
 const input=$('file'),log=$('log'),exportButtons=[...document.querySelectorAll('[data-export]')];
@@ -352,11 +469,14 @@ function stats(){
   const text=rows.map(r=>r.text).join('\n');
   $('lines').textContent=rows.length;$('chars').textContent=[...text.replace(/\s/gu,'')].length.toLocaleString('ja-JP');
   $('words').textContent=(text.match(/[A-Za-z]+(?:['’\-][A-Za-z]+)*/g)||[]).length.toLocaleString('ja-JP');
+  $('warnings').textContent=rows.filter(r=>r.flags?.length).length;
   $('empty').hidden=rows.length>0;sync();
 }
 function sync(){
   const busy=!!active;
   $('start').disabled=busy;$('stop').disabled=!busy||!!active?.cancelled;
+  $('comparePreset').disabled=busy;
+  $('rangeStart').disabled=busy;$('rangeEnd').disabled=busy;$('customRange').hidden=$('scope').value!=='custom';
   input.disabled=busy;$('model').disabled=busy;$('language').disabled=busy;$('execution').disabled=busy;$('runner').disabled=busy;$('scope').disabled=busy;
   $('drop').classList.toggle('disabled',busy);
   $('clear').disabled=busy||!rows.length;
@@ -381,6 +501,8 @@ function addRow(row){
   const del=document.createElement('button');del.className='danger';del.textContent='削除';del.setAttribute('aria-label',time(row.start)+' の行を削除');
   del.addEventListener('click',()=>{const i=rows.indexOf(row);if(i>=0)rows.splice(i,1);entry.remove();stats();save();});
   entry.append(meta,text,del);
+  if(Array.isArray(row.flags)&&row.flags.length){const warning=document.createElement('div');warning.className='warning';warning.textContent='要確認：'+row.flags.join(' / ');entry.append(warning);}
+  if(typeof row.initialRaw==='string'){const d=document.createElement('details');d.style.gridColumn='2 / -1';const title=document.createElement('summary');title.textContent='再認識前の原出力';const raw=document.createElement('p');raw.textContent=row.initialRaw||'（空出力）';raw.style.overflowWrap='anywhere';d.append(title,raw);entry.append(d);}
   if(typeof row.raw==='string'&&row.raw){const d=document.createElement('details');d.style.gridColumn='2 / -1';const summary=document.createElement('summary');summary.textContent='認識不良時の原出力（参考）';const raw=document.createElement('p');raw.textContent=row.raw;raw.style.overflowWrap='anywhere';d.append(summary,raw);entry.append(d);}
   log.append(entry);
 }
@@ -438,7 +560,7 @@ async function decode(file){
 function progress(done,total){$('progress').value=total?100*done/total:0;$('detail').textContent=done+' / '+total;}
 function finish(job,message,error=false){
   if(active!==job)return;
-  clearTimeout(job.timer);clearInterval(job.watch);job.worker?.terminate();if(job.url)URL.revokeObjectURL(job.url);active=null;trace(message);status(message,error);if(error)$('diagnostic').open=true;save();sync();
+  clearTimeout(job.timer);clearInterval(job.watch);job.worker?.terminate();if(job.url)URL.revokeObjectURL(job.url);active=null;trace('BUILD '+BUILD+' / '+message);status(message,error);if(error)$('diagnostic').open=true;save();sync();
 }
 function failure(stage){
   return ({language:'自動判定できませんでした。音声の言語を日本語または英語に指定して再試行してください。',gpu:'large-v3-turbo には WebGPU が必要です。tiny / base / small を選んでください。',
@@ -463,8 +585,8 @@ function onEngine(job,m){
       status('モデルを取得・準備中（容量は判明分）'+(cacheWarning?'。キャッシュ不可。':'。'));break;
     }
     case 'working':progress(m.done,m.total);trace('推論開始: '+(m.done+1)+' / '+m.total);status('文字起こしを実行しています。');break;
-    case 'chunk':job.done=m.done;for(const r of m.rows)addRow(r);progress(m.done,m.total);stats();save();status('文字起こし中。無音：'+m.skipped+' / 再認識：'+m.retried+' / 要確認：'+m.flagged);break;
-    case 'complete':progress(m.total,m.total);finish(job,'完了。無音：'+m.skipped+' 区間 / 再認識：'+m.retried+' 区間 / 要確認：'+m.flagged+' 行。');break;
+    case 'chunk':job.done=m.done;for(const r of m.rows)addRow(r);progress(m.done,m.total);stats();save();status('文字起こし中。無音：'+m.skipped+' / 反復再認識：'+m.retried+' / 空出力再認識：'+m.emptyRetried+' / 認識不良：'+m.flagged+' / 警告行：'+m.warningCount);break;
+    case 'complete':progress(m.total,m.total);finish(job,'完了。無音：'+m.skipped+' / 反復再認識：'+m.retried+' / 空出力再認識：'+m.emptyRetried+' / 空出力・静音判定：'+m.emptyQuiet+' / 認識不良：'+m.flagged+' 行 / 警告行：'+m.warningCount+' 行。警告0でも正確性は未保証。');break;
     case 'failed':if(m.message)trace(m.message);finish(job,failure(m.stage),true);break;
   }
 }
@@ -498,6 +620,18 @@ function workerStart(job,audio,settings){
     job.timer=setTimeout(()=>fallback('Worker 起動がタイムアウト'),8000);
   }catch(e){fallback('Worker を作成できません: '+e.message);}
 }
+$('comparePreset').addEventListener('click',()=>{
+  if(active)return;
+  $('model').value='small';$('language').value='ja';$('execution').value='wasm';
+  $('runner').value='worker';$('scope').value='60';sync();
+  status(rows.length?'比較設定を適用しました。前回の結果をTXTで保存し、クリアしてから開始してください。':'比較設定を適用しました。small / 日本語 / WASM / Worker / 冒頭60秒。');
+  trace('比較設定: small / ja / wasm / worker / 60秒');
+});
+$('scope').addEventListener('change',sync);
+function parseClock(value){
+  const m=String(value).trim().match(/^(\d{1,5}):([0-5]\d)$/);
+  return m?Number(m[1])*60+Number(m[2]):NaN;
+}
 $('start').addEventListener('click',async()=>{
   if(active)return;
   if(!selected&&input.files?.[0])selectFile(input.files[0]);
@@ -505,14 +639,17 @@ $('start').addEventListener('click',async()=>{
   if(typeof WebAssembly==='undefined'){status('この環境では WebAssembly を利用できません。Safari で HTTPS の URL を開いてください。',true);return;}
   if($('model').value==='turbo'&&$('execution').value==='wasm'){status('large-v3-turbo には WebGPU が必要です。実行方式を自動にするか、tiny / base を選択してください。',true);return;}
   if(rows.length){status('前回の結果が残っています。保存後にクリアを2回押してから開始してください。',true);$('clear').scrollIntoView({block:'nearest'});$('clear').focus();return;}
+  const custom=$('scope').value==='custom';
+  const from=custom?parseClock($('rangeStart').value):0,to=custom?parseClock($('rangeEnd').value):Infinity;
+  if(custom&&(!Number.isFinite(from)||!Number.isFinite(to)||to<=from)){status('開始・終了を分:秒で入力してください。終了は開始より後にしてください。',true);return;}
   const job={worker:null,last:Date.now(),cancelled:false};active=job;sourceName=selected.name;cacheWarning=false;sync();
-  traceLines.length=0;trace('開始 / '+location.protocol+' / '+selected.name+' / '+size(selected.size));
+  traceLines.length=0;trace('BUILD '+BUILD);trace('開始 / '+location.protocol+' / '+selected.name+' / '+size(selected.size));
   trace('モデル: '+$('model').value+' / 言語: '+$('language').value+' / 方式: '+$('execution').value+' / Secure Context: '+window.isSecureContext);
   job.watch=setInterval(()=>{if(active===job&&!job.cancelled&&Date.now()-job.last>20000){trace('処理待機中（20秒以上更新なし）');job.last=Date.now();$('diagnostic').open=true;}},5000);
   progress(0,0);$('progress').removeAttribute('value');status('音声を読み込み、16 kHz モノラルに変換しています。');
   const settings={model:$('model').value,language:$('language').value,execution:$('execution').value};
   let audio;
-  try{audio=await decode(selected);trace('16 kHz 変換完了: '+(audio.length/16000).toFixed(1)+'秒');if($('scope').value==='60'&&audio.length>960000){audio=audio.slice(0,960000);trace('精度確認モード: 最初の60秒');}}
+  try{audio=await decode(selected);trace('16 kHz 変換完了: '+(audio.length/16000).toFixed(1)+'秒');if(custom){const stop=Math.min(audio.length,Math.round(to*16000));const start=Math.round(from*16000);if(start>=stop||to>audio.length/16000){finish(job,'指定範囲が録音の長さを超えています。',true);return;}audio=audio.slice(start,stop);settings.offset=start/16000;trace('範囲試験: '+from+'–'+to+'秒（元音声の時刻、分割境界は全体処理と異なる場合あり）');}else if($('scope').value==='60'&&audio.length>960000){audio=audio.slice(0,960000);trace('精度確認モード: 最初の60秒');}}
   catch(error){
     console.error(error);trace(String(error?.message??error));const memory=/memory|allocat|length/i.test(String(error?.message??error));
     finish(job,memory?failure('memory'):'音声を読み込めませんでした。ファイル形式や破損の有無を確認してください。長い録音は分割して試してください。',true);return;
@@ -539,7 +676,7 @@ function csvCell(v){
 function makeExport(format){
   const plain=rows.map(r=>'['+time(r.start)+'] '+r.text).join('\n');
   if(format==='md')return rows.map(r=>'**'+time(r.start)+'** ('+r.lang+')\n\n'+r.text).join('\n\n---\n\n');
-  if(format==='csv')return '\uFEFF'+[['開始','終了','言語','本文'],...rows.map(r=>[subtime(r.start),subtime(r.end),r.lang,r.text])].map(r=>r.map(csvCell).join(',')).join('\r\n');
+  if(format==='csv')return '\uFEFF'+[['開始','終了','言語','本文','要確認'],...rows.map(r=>[subtime(r.start),subtime(r.end),r.lang,r.text,(r.flags||[]).join(' / ')])].map(r=>r.map(csvCell).join(',')).join('\r\n');
   if(format==='srt')return rows.filter(r=>r.text.trim()).map((r,i)=>(i+1)+'\n'+subtime(r.start)+' --> '+subtime(Math.max(r.start+0.001,r.end))+'\n'+r.text.trim().replace(/\n\s*\n/g,'\n')).join('\n\n')+'\n';
   return plain;
 }
@@ -565,9 +702,9 @@ for(const b of exportButtons)b.addEventListener('click',async()=>{
   }else download(f,text);
 });
 window.addEventListener('pagehide',()=>{if(saveTimer!==null)save();});
-$('copyTrace').addEventListener('click',async()=>{const ok=await copyText(traceLines.join('\n'));if(!ok)status('診断情報を選択してコピーしてください。');});
+$('copyTrace').addEventListener('click',async()=>{const ok=await copyText('BUILD '+BUILD+'\n'+traceLines.join('\n'));if(!ok)status('診断情報を選択してコピーしてください。');});
 restore();
-trace('画面起動 2.1: '+location.protocol+' / '+navigator.userAgent);
+trace('画面起動 '+BUILD+': '+location.protocol+' / '+navigator.userAgent);
 status(rows.length?'前回の結果を復元しました。新しい音声は選択できます。開始前に既存の結果を保存してクリアしてください。':'準備完了。音声ファイルを選択してください。');
 </script>
 </body>
