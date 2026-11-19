@@ -1,0 +1,1118 @@
+<!doctype html>
+<!--
+  未検証: Safari / iPhone 実機の Whisper 推論・モデル名と API 引数の組み合わせ。HTTPS 配信を推奨。
+  モデル配布と Transformers.js 3.8.1 の公開仕様は確認済み。
+  音声と文字起こしはブラウザ内で処理し、外部には送信しない設計。
+  改訂 2.1: 明示的な言語指定、試験的な言語トークン検出、反復検出・再認識、base 推奨、60秒試験。
+  自動検出と反復再認識の実機検証は未実施。
+  改訂 2.2: 初回認識の no_repeat_ngram を撤廃（再認識のみ 10）、空出力を正常扱い、無音判定を録音内ノイズ床基準に変更。
+  改訂 2.3: 空出力時に音声活動の有無を再検査し、有音候補のみ短区間で再認識。再び空なら要確認行を残す。再認識は1回のみ。
+  未検証: 2.3 の Safari 実機 Whisper 推論と精度比較。活動量判定は音量・継続時間に基づくヒューリスティックで、発話の確定判定ではない。
+  改訂 2.4: ビルド識別、話者表記・低密度の警告、任意区間試験、活動量ログ。Safari 実機未検証。
+  改訂 2.5: OVZ記事由来の表記候補、公開記事からのオンデマンド更新、承認式の修正学習、辞書のバックアップ。
+  改訂 2.5.1: OVZ CLASSIC最終追加分(2026-10-06〜16)からの候補抽出。公開元IDと出典を保持。
+  改訂 2.5.2: CLASSIC全アーカイブ（基礎データ、増分データ、最終追加）を利用者の操作で読み込み、疑わしい語彙候補を重複排除して登録する。音声・文字起こしの自動修正はしない。
+  未検証: Safari実機の語彙同期、実音声を用いた語彙補正の効果。Whisperモデルの重み・推論パラメータは不変。
+  言語チップは選択または検出した認識言語。無音判定は簡易 RMS 方式。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音声文字起こし</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<style>
+:root {
+  color-scheme: light;
+  --bg:#f5f5f2; --panel:#fff; --ink:#202522; --muted:#5d6661;
+  --line:#d4d9d5; --accent:#285947; --on-accent:#fff;
+  --soft:#e8efeb; --danger:#a33131; --focus:#176d99;
+  --font:'Noto Sans JP',sans-serif; --mono:'IBM Plex Mono',monospace;
+}
+@media(prefers-color-scheme:dark) {
+  :root {color-scheme:dark; --bg:#171b19; --panel:#202623; --ink:#e7ece8;
+    --muted:#a7b2ac; --line:#404a44; --accent:#a4d6bc; --on-accent:#132419;
+    --soft:#2c3932; --danger:#ffaaaa; --focus:#80c8f0;}
+}
+* {box-sizing:border-box}
+body {margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.7 var(--font)}
+main {width:min(100%,760px);margin:auto;padding:32px 16px 56px}
+h1 {font-size:clamp(24px,5vw,34px);margin:0;letter-spacing:-.04em}
+h2 {font-size:18px;margin:0 0 12px}
+p {margin:8px 0}
+.muted,small {color:var(--muted);font-size:12px}
+section {margin-top:22px;padding:18px;border:1px solid var(--line);background:var(--panel);border-radius:8px;min-width:0}
+button,select,textarea,input {font:inherit;color:inherit}
+#customRange input {width:100%;min-width:0;padding:8px;border:1px solid var(--line);background:var(--panel);border-radius:5px}
+.warning {color:var(--danger);font-size:11px;overflow-wrap:anywhere}
+.entry .warning {grid-column:2 / -1}
+button,select {min-height:42px;padding:7px 12px;border:1px solid var(--line);background:var(--panel);border-radius:5px}
+button {cursor:pointer;font-weight:500}
+button:disabled,select:disabled {opacity:.5;cursor:not-allowed}
+button.primary {background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+button.danger {color:var(--danger)}
+:focus-visible {outline:2px solid var(--focus);outline-offset:3px}
+.drop {display:grid;gap:10px;border:1px dashed var(--muted);border-radius:6px;padding:20px 14px;overflow-wrap:anywhere}
+#file {display:block;width:100%;min-width:0;max-width:100%;font:inherit;color:var(--ink);padding:6px 0;cursor:pointer}
+#file::file-selector-button {font:inherit;color:var(--on-accent);background:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:8px 12px;margin-right:10px;cursor:pointer}
+#fileName {overflow-wrap:anywhere}
+.drop.drag {background:var(--soft);border-color:var(--accent)}
+.drop:focus-within {outline:2px solid var(--focus);outline-offset:3px}
+.drop.disabled {opacity:.6;cursor:not-allowed}
+.sr {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.fields {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+.fields label {display:grid;gap:5px;min-width:0;font-size:13px;font-weight:500}
+select {width:100%;min-width:0}
+.actions {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
+progress {width:100%;height:12px;accent-color:var(--accent);display:block;margin:12px 0}
+.status {min-height:26px;overflow-wrap:anywhere}
+.status.error {color:var(--danger)}
+.numbers,time,.chip {font-family:var(--mono);font-variant-numeric:tabular-nums}
+.summary {display:flex;gap:8px 18px;flex-wrap:wrap;color:var(--muted);font-size:13px}
+.log {border-top:1px solid var(--line);margin-top:14px}
+.entry {display:grid;grid-template-columns:65px minmax(0,1fr) auto;gap:8px;align-items:start;border-bottom:1px solid var(--line);padding:13px 0}
+.meta {display:grid;gap:6px;justify-items:start;color:var(--muted);font-size:12px}
+.chip {background:var(--soft);color:var(--accent);padding:1px 5px;border-radius:3px;font-size:11px}
+textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:4px;padding:7px;background:var(--panel);line-height:1.65;field-sizing:content}
+.entry button {font-size:12px;padding:4px 7px;min-height:36px}
+#empty {padding:18px 0;color:var(--muted)}
+[hidden] {display:none!important}
+@media(max-width:440px) {
+  button,select,input,textarea {font-size:16px} .entry button {font-size:13px}
+  main {padding:24px 10px 40px} section {padding:12px}
+  .fields {grid-template-columns:1fr}.entry {grid-template-columns:53px minmax(0,1fr) auto;gap:5px}
+}
+@media(prefers-reduced-motion:reduce) {* {scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+
+/* OVZ vocab — dictionary stays separate from transcript */
+#vocabSection .fields {margin:12px 0}
+#vocabSection input[type=text], #vocabSection input[type=search] {width:100%;min-width:0;min-height:42px;border:1px solid var(--line);background:var(--panel);border-radius:5px;padding:8px 10px}
+.vocab-items {border-top:1px solid var(--line);margin-top:10px;max-height:280px;overflow:auto}
+.vocab-item {display:flex;gap:8px;align-items:center;border-bottom:1px solid var(--line);padding:8px 0;min-width:0}
+.vocab-item-main {flex:1;min-width:0;overflow-wrap:anywhere}
+.vocab-hints {grid-column:2 / -1;display:grid;gap:5px;background:var(--soft);border-radius:4px;padding:7px 9px;font-size:12px}
+.vocab-hint {display:flex;align-items:center;flex-wrap:wrap;gap:7px;overflow-wrap:anywhere}
+.vocab-hint button,.vocab-item button {min-height:34px;font-size:12px}
+.vocab-hint strong {overflow-wrap:anywhere}
+.vocab-learn {grid-column:2 / -1;display:flex;justify-content:flex-start}
+.vocab-learn button {font-size:12px;min-height:34px}
+.vocab-note {margin-top:6px;font-size:12px;color:var(--muted)}
+#ovzStatus {overflow-wrap:anywhere}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>音声文字起こし</h1>
+  <p class="muted">Safari 対応版 <strong id="build">2.5.2-20261119-r1</strong> / OVZ語彙学習</p>
+  <p class="muted">日本語・英語対応。音声は端末内で処理します。</p>
+</header>
+<section aria-labelledby="inputHeading">
+  <h2 id="inputHeading">音声と認識設定</h2>
+  <div class="drop" id="drop">
+    <label for="file"><strong>音声ファイルを選択</strong></label>
+    <input id="file" type="file" aria-describedby="fileName fileHelp">
+    <span class="muted" id="fileHelp">MP3、WAV、M4A など。ここにドロップすることもできます。</span>
+    <span id="fileName" role="status" aria-live="polite">未選択</span>
+  </div>
+  <noscript><p class="status error">JavaScript が無効です。iPhone の「ファイル」内のプレビューではなく、HTTPS の URL を Safari で開いてください。</p></noscript>
+  <div class="fields">
+    <label>認識モデル<select id="model">
+      <option value="tiny">tiny — 起動確認向け（低精度）</option>
+      <option value="base">base — iPhone の標準</option>
+      <option value="small" selected>small — 標準</option>
+      <option value="turbo">large-v3-turbo — WebGPU 必須</option>
+    </select></label>
+    <label>音声の言語<select id="language">
+      <option value="ja" selected>日本語</option><option value="en">英語（English）</option>
+      <option value="auto">自動判定（試験・録音単位）</option>
+    </select></label>
+  </div>
+  <div class="fields"><label>実行方式<select id="execution"><option value="auto">自動（WebGPU 優先）</option><option value="wasm">互換性優先（WASM）</option></select></label><label>実行場所<select id="runner"><option value="worker">バックグラウンド（Worker）</option><option value="direct">直接実行（予備）</option></select></label></div>
+  <div class="fields"><label>処理範囲<select id="scope"><option value="full">音声全体</option><option value="60">最初の60秒だけ（精度確認）</option><option value="custom">任意の時間範囲（精度確認）</option></select></label></div>
+  <div class="fields" id="customRange" hidden><label>開始時刻（分:秒）<input id="rangeStart" type="text" inputmode="text" value="10:30" placeholder="10:30"></label><label>終了時刻（分:秒）<input id="rangeEnd" type="text" inputmode="text" value="11:55" placeholder="11:55"></label></div>
+  <p class="muted">日本語または英語を明示すると誤認識を減らせます。自動判定は最初の有音区間で言語を決めます。</p>
+  <p id="compat" class="muted" role="status">iPhone では HTTPS の URL を Safari で開いてください。ファイルのプレビューでは動作しません。</p>
+  <p id="backend" class="muted">実行時に WebGPU / WASM を判定します。</p>
+  <div class="actions">
+    <button id="comparePreset" type="button">60秒・small の比較設定</button>
+    <button id="start" class="primary" disabled>文字起こしを開始</button>
+    <button id="stop" disabled>中止</button>
+  </div>
+  <progress id="progress" max="100" value="0" aria-label="処理の進捗"></progress>
+  <div id="detail" class="numbers muted">0 / 0</div>
+  <p id="status" class="status" role="status" aria-live="polite">起動確認中。変わらない場合は HTML のプレビューではなく Chrome / Edge で開いてください。</p>
+  <small>モデルの初回取得には通信が必要です。iPhone では短い録音から試してください。既存の結果は保存してからクリアしてください。</small>
+  <details id="diagnostic"><summary>動作状況・エラー詳細</summary><pre id="trace" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:8px 0"></pre><button id="copyTrace" type="button">診断情報をコピー</button></details>
+</section>
+<section aria-labelledby="resultsHeading">
+  <h2 id="resultsHeading">文字起こし結果</h2>
+  <div class="summary"><span>行数 <strong id="lines">0</strong></span><span>警告行 <strong id="warnings">0</strong></span><span>文字数 <strong id="chars">0</strong></span><span>英単語数 <strong id="words">0</strong></span></div>
+  <div class="actions" id="exports">
+    <button data-export="copy">コピー</button><button data-export="share" hidden>共有・保存</button><button data-export="txt">TXT</button>
+    <button data-export="md">MD</button><button data-export="csv">CSV</button>
+    <button data-export="srt">SRT</button><button id="clear" class="danger">クリア</button>
+  </div>
+  <p id="saveState" class="muted" role="status">自動保存：確認中</p>
+  <small>下書き専用。要確認が0でも正確性や話者の帰属は保証されません。音量は発話と雑音を区別できません。警告は原文を変更しません。文字数は空白を除きます。CSVにも警告を記録します。</small>
+  <div id="log" class="log"></div><p id="empty">文字起こし結果はまだありません。</p>
+</section>
+
+<section id="vocabSection" aria-labelledby="vocabHeading">
+  <h2 id="vocabHeading">OVZ語彙辞書（試験版）</h2>
+  <p class="muted">ONE VOICE ZINEに掲載された表記を候補として参照します。辞書はWhisper本体を再学習しません。認識文は自動変更されず、候補を押した場合だけ修正します。</p>
+  <div class="summary"><span>サイト由来の候補 <strong id="vocabCount">0</strong> 件</span><span>学習済みの対応 <strong id="learnCount">0</strong> 件</span></div>
+  <div class="actions">
+    <button id="ovzUpdate" type="button">OVZ公開記事から更新</button>
+    <button id="classicUpdate" type="button">CLASSICから語彙を追加</button>
+    <button id="fullArchiveUpdate" type="button">全アーカイブから語彙を収集（約6.6MB）</button>
+    <button id="vocabExport" type="button">辞書をバックアップ（JSON）</button>
+    <label for="vocabImport" class="muted">辞書を復元（JSON）</label>
+    <input type="file" accept=".json,application/json" id="vocabImport" style="max-width:100%;min-width:0">
+  </div>
+  <p class="muted" id="ovzStatus" role="status">OVZの記事掲載表記を初期候補として利用できます。更新は手動で開始します。</p>
+  <p class="muted" id="classicStatus" role="status">CLASSIC最終追加データ（2026年10月6日〜16日分）も別途取り込めます。</p>
+  <p class="muted" id="fullArchiveStatus" role="status">全アーカイブ：初回の手動実行で基礎・増分・最終追加を読み込みます。データは約6.6MB以上です。Wi-Fi推奨。サイトの原文は変えず、固有名詞の未確認候補のみ取り込みます。</p>
+  <label for="termSearch">掲載表記を検索</label>
+  <input id="termSearch" type="search" placeholder="例：BLINDSIDE、INTEGRITY、タクヤン" autocomplete="off">
+  <div id="termList" class="vocab-items" aria-live="polite"></div>
+  <h2 style="margin-top:22px">誤認識を覚える</h2>
+  <p class="muted">下の2項目を確認して登録してください。本文は自動的に書き換えません。</p>
+  <div class="fields">
+    <label>誤認識された表記<input id="variantTerm" type="text" maxlength="80" placeholder="例：自動紹介"></label>
+    <label>正しい表記<input id="correctTerm" type="text" maxlength="100" placeholder="例：自己紹介"></label>
+  </div>
+  <div class="actions"><button type="button" id="termSave" class="primary">この対応を学習</button></div>
+  <p id="termStatus" class="muted" role="status"></p>
+  <details><summary>学習済みの表記（削除可能）</summary><div id="learnedList" class="vocab-items"></div></details>
+  <p class="vocab-note">「公開記事から更新」「CLASSICから語彙を追加」「全アーカイブから語彙を収集」はOVZの公開データを読み取ります（通信が必要）。全アーカイブは安全のため分離した画面内で実行し、本体の録音データにはアクセスできません。抽出名は未確認候補で自動置換しません。音声・文字起こし本文・個人辞書は外部へ送信しません。ブラウザの保存領域を消すと個人辞書も失われるため、JSONでバックアップしてください。</p>
+</section>
+</main>
+<!-- 推論エンジン: Worker と直接実行で共用。 -->
+<script>
+function createEngine(send, cancelled = () => false, importer = url => import(url)) {
+const CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+const MODELS = {tiny:'onnx-community/whisper-tiny',base:'onnx-community/whisper-base',small:'onnx-community/whisper-small',turbo:'onnx-community/whisper-large-v3-turbo'};
+const SR = 16000, WINDOW = 30*SR, SEARCH = 3*SR;
+let gate={rms:0.004,peak:0.01}; // calibrate() で録音ごとに更新
+const check = () => { if(cancelled()) throw new Error("cancelled"); };
+const yieldUI = () => new Promise(resolve=>setTimeout(resolve,0));
+const clamp = (x,a,b) => Math.max(a,Math.min(b,x));
+function energy(a,s,e) {
+  let sum=0, peak=0;
+  for(let i=s;i<e;i++){const v=a[i];sum+=v*v;peak=Math.max(peak,Math.abs(v));}
+  return {rms:Math.sqrt(sum/Math.max(1,e-s)),peak};
+}
+function plan(a) {
+  const cuts=[]; let s=0;
+  const half=1600, step=320; // 200ms の評価窓 / 20ms 刻み
+  while(s<a.length) {
+    let e=Math.min(s+WINDOW,a.length);
+    if(e<a.length) {
+      let best=Infinity, cut=e;
+      for(let p=e-SEARCH;p<=e;p+=step) {
+        const score=energy(a,Math.max(s,p-half),Math.min(e,p+half)).rms;
+        if(score<=best){best=score;cut=p;}
+      }
+      e=cut;
+    }
+    cuts.push([s,e]);s=e;
+  }
+  return cuts;
+}
+// 録音全体の 20ms フレーム RMS から、ノイズ床（下位10%）と発話水準（上位95%）を求め、有音閾値を相対化する。
+function calibrate(a) {
+  const n=Math.floor(a.length/320);
+  if(n<10){gate={rms:0.004,peak:0.01};return gate;}
+  const f=new Float32Array(n);
+  for(let i=0;i<n;i++)f[i]=energy(a,i*320,i*320+320).rms;
+  f.sort();
+  const floor=f[Math.floor(n*0.10)], top=f[Math.min(n-1,Math.floor(n*0.95))];
+  const rms=Math.min(Math.max(0.0008,floor*2.5),Math.max(0.0008,top*0.5),0.01);
+  gate={rms,peak:rms*2.5};
+  return gate;
+}
+function silent(a,s,e) {
+  let voiced=0;
+  for(let p=s;p<e;p+=320) {
+    const {rms,peak}=energy(a,p,Math.min(e,p+320));
+    if(rms>=gate.rms && peak>=gate.peak && ++voiced>=3) return false;
+  }
+  return true;
+}
+// 空出力の再評価専用。20ms フレームの振幅・持続性を確認する。
+// 正確な音声区間検出(VAD)ではない。迷う場合は「音声候補」として扱い、欠落を見えるようにする。
+function speechCandidate(a,s,e) {
+  const step=320; // 20ms @16kHz
+  const threshold=Math.max(0.0008,Math.min(0.003,gate.rms*0.35));
+  let active=0, run=0, longest=0, highest=0, sum=0, frames=0;
+  for(let p=s;p<e;p+=step){
+    const {rms,peak}=energy(a,p,Math.min(p+step,e));
+    frames++;sum+=rms;highest=Math.max(highest,peak);
+    if(rms>=threshold && peak>=threshold*2){
+      active++;run++;longest=Math.max(longest,run);
+    }else run=0;
+  }
+  // 強い雑音でも活動と判定する可能性があるが、無根拠な欠落より要確認表示を優先する。
+  const candidate=(longest>=8 && active>=12) || (active>=20 && active>=frames*0.12);
+  const uncertain=!candidate && active>=3; // 短い返答を静音として捨てない
+  return {candidate,uncertain,active,frames,longest,rms:sum/Math.max(1,frames),peak:highest};
+}
+// 原区間より短く連続分割し、境界を最後の2秒の静音位置に寄せる。無限再試行しない。
+function shortCuts(a,s,e) {
+  const cuts=[];let left=s;
+  while(left<e){
+    let right=Math.min(left+10*SR,e);
+    if(right<e){
+      let best=Infinity,cut=right;
+      for(let pos=Math.max(left+SR,right-2*SR);pos<=right;pos+=320){
+        const rms=energy(a,Math.max(left,pos-800),Math.min(e,pos+800)).rms;
+        if(rms<=best){best=rms;cut=pos;}
+      }
+      right=cut;
+    }
+    cuts.push([left,right]);left=right;
+  }
+  return cuts;
+}
+function resultRows(output,start,end,lang) {
+  const duration=end-start;
+  const chunks=output?.chunks?.length ? output.chunks : [{text:output?.text,timestamp:[0,duration]}];
+  return chunks.flatMap((c,i)=>{
+    const text=String(c.text??'').trim(); if(!text)return [];
+    const [a,b]=c.timestamp??[];
+    const next=chunks[i+1]?.timestamp?.[0];
+    const from=clamp(Number.isFinite(a)?a:0,0,duration);
+    const to=clamp(Number.isFinite(b)?b:Number.isFinite(next)?next:duration,from,duration);
+    return [{start:start+from,end:start+to,lang:lang.toUpperCase(),text}];
+  });
+}
+// Detect pathological loops, not ordinary isolated repeated words.
+function normalized(text) {return text.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\s]/gu,'');}
+function loopSuspect(output, rows) {
+  const ns=rows.map(r=>normalized(r.text)).filter(Boolean);
+  let run=1;const counts=new Map();
+  for(let i=0;i<ns.length;i++){
+    const n=ns[i];counts.set(n,(counts.get(n)||0)+1);
+    run=i&&n===ns[i-1]?run+1:1;
+    if(run>=4)return true;
+  }
+  if(ns.length>=5&&Math.max(0,...counts.values())>=4&&Math.max(0,...counts.values())/ns.length>=0.6)return true;
+  const full=String(output?.text||rows.map(r=>r.text).join(' '));
+  const words=full.toLowerCase().match(/[a-z0-9]+|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu)||[];
+  for(let k=1;k<=Math.min(20,Math.floor(words.length/5));k++){
+    let streak=0;
+    for(let i=k;i<words.length;i++){
+      streak=words[i]===words[i-k]?streak+1:0;
+      if(streak>=Math.max(12,4*k))return true;
+    }
+  }
+  if(ns.length>=3&&ns.every(n=>/^(inaudible|speakinginforeignlanguage|coughing|laughter|聞き取れない|不明)$/.test(n)))return true;
+  return false;
+}
+async function detectLanguage(pipe,samples) {
+  const cfg=pipe.model.generation_config;
+  if(!cfg?.lang_to_id||!Number.isFinite(cfg.decoder_start_token_id))throw new Error('言語検出設定がありません');
+  const features=await pipe.processor(samples);
+  try {
+    // 3.8.1 does not detect language in the ASR pipeline. Read Whisper's first decoder token instead.
+    const result=await pipe.model.generate({inputs:features.input_features,decoder_input_ids:[cfg.decoder_start_token_id],max_new_tokens:1,return_timestamps:false,do_sample:false,num_beams:1,forced_decoder_ids:null,suppress_tokens:[],begin_suppress_tokens:[],return_dict_in_generate:false});
+    const tokens=(result.sequences??result)[0].tolist();
+    const id=Number(tokens.at(-1));
+    for(const lang of ['ja','en'])if(id===cfg.lang_to_id['<|'+lang+'|>'])return lang;
+    throw new Error('日本語・英語を判定できません (token '+id+')');
+  } finally {try{features.input_features?.dispose?.();}catch{}}
+}
+// 警告は推論結果を変更せず、要校正の目印だけを付ける。
+function mark(row,reason){row.flags=[...new Set([...(row.flags||[]),reason])];}
+function annotate(a,s,e,rows){
+  const chars=t=>[...String(t).replace(/\s/gu,'')].length;
+  const signal=speechCandidate(a,s,e);
+  const activeSec=signal.active*0.02;
+  const count=rows.reduce((n,r)=>n+(r.text.startsWith('［要確認：')?0:chars(r.text)),0);
+  const density=activeSec?count/activeSec:0;
+  const common=/^(笑|笑い|拍手|咳|音楽|歓声|laughter|laughs?|applause|coughing|music)$/iu;
+  const checkGap=(from,to,row)=>{
+    if(to-from<8||!row)return;
+    const x=Math.max(s,Math.round(from*SR)),y=Math.min(e,Math.round(to*SR));
+    if(y-x<8*SR)return;
+    const activity=speechCandidate(a,x,y);
+    if(activity.candidate&&activity.active/Math.max(1,activity.frames)>=0.5)mark(row,'有音の空白（欠落の疑い）');
+  };
+  let cursor=s/SR,previous=null;
+  for(const row of rows){
+    const label=row.text.match(/^\s*[（(]([^）)]{1,24})[）)]/u);
+    if(label&&!common.test(label[1].trim()))mark(row,'話者・括弧表記（未確認）');
+    if(row.text.startsWith('［要確認：'))mark(row,'認識不良・空出力');
+    const duration=row.end-row.start;
+    if(duration>=8&&chars(row.text)/duration<2){
+      const x=Math.max(s,Math.round(row.start*SR)),y=Math.min(e,Math.round(row.end*SR));
+      if(y>x){const z=speechCandidate(a,x,y);if(z.candidate&&z.active/Math.max(1,z.frames)>=0.5)mark(row,'低密度（欠落の疑い）');}
+    }
+    checkGap(cursor,row.start,previous||row);
+    if(row.end>=cursor){cursor=row.end;previous=row;}
+  }
+  checkGap(cursor,e/SR,previous);
+  if(activeSec>=8&&density<2&&rows.length&&signal.active/Math.max(1,signal.frames)>=0.5)mark(rows[0],'区間の低密度（欠落の疑い）');
+  return {activeSec,density,count};
+}
+async function run({audio,model,language,execution,offset=0}) {
+  check(); calibrate(audio); send('debug',{message:'有音閾値 rms='+gate.rms.toFixed(5)+' peak='+gate.peak.toFixed(5)});
+  const cuts=plan(audio);send('plan',{total:cuts.length});
+  let pipe=null, device='wasm', stage='model', skipped=0, flagged=0, retried=0, emptyRetried=0, emptyQuiet=0, warningCount=0;
+  let resolved=language==='auto'?null:language;
+  let library=null;
+  async function release(){if(pipe){try{await pipe.dispose();}catch{}pipe=null;}}
+  async function load(use) {
+    stage='model';device=use;send('backend',{device});
+    if(!library){
+      send('stage',{message:'認識ライブラリを読み込み中'});
+      library=await importer(CDN);check();
+      const {env}=library;env.allowLocalModels=false;
+      if(env.backends?.onnx?.wasm){env.backends.onnx.wasm.numThreads=1;env.backends.onnx.wasm.proxy=false;}
+      try{await caches.open('transformers-cache');env.useBrowserCache=true;}
+      catch{env.useBrowserCache=false;send('cacheWarning');}
+    }
+    check();send('stage',{message:'Whisper モデルを読み込み中'});
+    const files=new Map();
+    const dtype=use==='wasm'?'q8':model==='turbo'?'q4':model==='tiny'?'q8':{encoder_model:'fp32',decoder_model_merged:'q4'};
+    pipe=await library.pipeline('automatic-speech-recognition',MODELS[model],{
+      device:use,dtype,progress_callback(p){
+        if(!p.file)return;
+        const previous=files.get(p.file)??{loaded:0,total:0};
+        if(p.status==='progress')files.set(p.file,{loaded:p.loaded??0,total:p.total??0});
+        else if(p.status==='done')files.set(p.file,{loaded:previous.total||previous.loaded,total:previous.total});
+        else if(!files.has(p.file))files.set(p.file,previous);
+        let loaded=0,total=0;
+        for(const f of files.values()){loaded+=f.loaded;total+=f.total;}
+        send('download',{loaded,total,file:p.file});
+      }
+    });
+    check();send('stage',{message:'モデル準備完了'});
+  }
+  async function wasmFallback(){
+    await release();send('fallback');await load('wasm');
+  }
+  try {
+    let gpu=false;
+    if(execution!=='wasm' && cuts.some(([s,e])=>!silent(audio,s,e))){
+      send('stage',{message:'実行方式を確認中'});
+      try{gpu=!!(await Promise.race([globalThis.navigator?.gpu?.requestAdapter(),new Promise(r=>setTimeout(()=>r(null),5000))]));}catch{}
+    }
+    check();
+    if(model==='turbo'&&!gpu&&cuts.some(([s,e])=>!silent(audio,s,e))){send('failed',{stage:'gpu'});return;}
+    async function recognize(samples,lang,strict=false) {
+      const options={task:'transcribe',language:lang,return_timestamps:true,chunk_length_s:0,do_sample:false,num_beams:1,max_new_tokens:Math.min(440,Math.max(48,Math.ceil(samples.length/SR*14)+16))};
+      if(strict)options.no_repeat_ngram_size=10; // 初回は制限なし。正当な反復を歪めないため、再認識のみ緩く適用
+      try {return await pipe(samples,options);}
+      catch(error){
+        check();if(device!=='webgpu'||model==='turbo')throw error;
+        send('debug',{message:String(error?.message??error)});await wasmFallback();stage='inference';
+        return await pipe(samples,options);
+      }
+    }
+    for(let i=0;i<cuts.length;i++){
+      await yieldUI();check();
+      const [s,e]=cuts[i];let rows=[],initialRaw=null;
+      if(silent(audio,s,e))skipped++;
+      else {
+        if(!pipe){
+          try{await load(gpu?'webgpu':'wasm');}
+          catch(error){check();if(device!=='webgpu'||model==='turbo')throw error;send('debug',{message:String(error?.message??error)});await wasmFallback();}
+        }
+        stage='inference';send('working',{done:i,total:cuts.length});
+        check();const samples=audio.subarray(s,e);
+        if(!resolved){
+          try{resolved=await detectLanguage(pipe,samples);}
+          catch(error){send('failed',{stage:'language',message:String(error?.message??error)});return;}
+          send('debug',{message:'言語トークン検出: '+resolved});
+        }
+        const output=await recognize(samples,resolved);
+        check();rows=resultRows(output,s/SR,e/SR,resolved);
+        // 初回結果が空の場合でも、音量・持続時間を再評価し、発話候補なら再認識する。
+        const isEmpty=rows.length===0;
+        const isLoop=rows.length>0&&loopSuspect(output,rows);
+        if(isEmpty||isLoop){
+          const signal=isEmpty?speechCandidate(audio,s,e):null;
+          if(isEmpty&&!signal.candidate&&!signal.uncertain){
+            emptyQuiet++;
+            send('debug',{message:'区間 '+(i+1)+'：空出力。音声活動は少なく再認識を省略（RMS平均 '+signal.rms.toFixed(5)+'）'});
+          }else{
+            if(isEmpty){emptyRetried++;send('debug',{message:'区間 '+(i+1)+'：空出力だが音声候補'+(signal.uncertain?'（短音・不確実）':'')+'あり（活動 '+signal.active+'/'+signal.frames+' フレーム）。短区間で1回だけ再認識'});}
+            else{retried++;send('debug',{message:'区間 '+(i+1)+'：反復を検出。短区間で再認識'});}
+            initialRaw=String(output?.text||rows.map(r=>r.text).join(' '));
+            rows=[];
+            for(const [left,right] of shortCuts(audio,s,e)){
+              await yieldUI();check();
+              const evidence=speechCandidate(audio,left,right);
+              if(!evidence.candidate&&!evidence.uncertain){
+                send('debug',{message:'再認識区間 '+(left/SR).toFixed(1)+'–'+(right/SR).toFixed(1)+'秒：音声活動は少ないため省略'});
+                continue;
+              }
+              // 空出力の再認識は自然な繰り返しを抑止しない。反復異常のみ strict を適用。
+              const retry=await recognize(audio.subarray(left,right),resolved,isLoop);
+              check();
+              const candidate=resultRows(retry,left/SR,right/SR,resolved);
+              if(!candidate.length){
+                flagged++;
+                rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：音声候補あり・文字起こしなし］'});
+                send('debug',{message:'再認識区間 '+(left/SR).toFixed(1)+'–'+(right/SR).toFixed(1)+'秒：再度空出力。要確認行を記録'});
+              }else if(loopSuspect(retry,candidate)){
+                flagged++;
+                rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：認識不良］',raw:String(retry?.text||candidate.map(r=>r.text).join(' '))});
+              }else rows.push(...candidate);
+            }
+            if(!rows.length){flagged++;rows.push({start:s/SR,end:e/SR,lang:resolved.toUpperCase(),text:'［要確認：再認識で結果なし］'});}
+            rows[0].initialRaw=initialRaw;
+            mark(rows[0],'再認識済み（原音確認）');
+          }
+        }
+      }
+      const metrics=annotate(audio,s,e,rows);
+      warningCount+=rows.filter(r=>r.flags?.length).length;
+      send('debug',{message:'区間 '+(i+1)+' '+(s/SR+offset).toFixed(1)+'–'+(e/SR+offset).toFixed(1)+'秒 / 活動 '+metrics.activeSec.toFixed(1)+'秒 / '+metrics.count+'文字 / '+metrics.density.toFixed(2)+'文字/活動秒'});
+      for(const r of rows){r.start+=offset;r.end+=offset;}
+      send('chunk',{rows,done:i+1,total:cuts.length,skipped,flagged,retried,emptyRetried,emptyQuiet,warningCount});
+    }
+    send('complete',{skipped,total:cuts.length,flagged,retried,emptyRetried,emptyQuiet,warningCount});
+  }catch(error){
+    const message=String(error?.message??error);
+    const memory=/out of memory|allocat|memory access|buffer size|device lost/i.test(message);
+    if(!cancelled())send('failed',{stage:memory?'memory':stage,message});
+    console.error(error);
+  }finally{await release();}
+}
+return {run};
+}
+</script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const KEY='local-whisper-transcript-v1';
+const BUILD='2.5.2-20261119-r1';
+
+// OVZ vocabulary seed from public repository metadata and four interview article bodies.
+// These are *published strings*, NOT validated pronunciations / alias pairs.
+const OVZ_SEED = [["オオクボ","weep-total-eclipse-tour-final","メタデータ"],["MASAO","weep-total-eclipse-tour-final","メタデータ"],["WEEP","weep-total-eclipse-tour-final","メタデータ"],["xtkx","xtkx-otus-driven-from-within","メタデータ"],["Otus","xtkx-otus-driven-from-within","メタデータ"],["teryn","teryn-severance","メタデータ"],["Severance","teryn-severance","メタデータ"],["Dan Gump","dan-gump","メタデータ"],["Life Sentence Records","dan-gump","メタデータ"],["Excessive Force","dan-gump","メタデータ"],["xkb97x","xkb97x-seasons-end","メタデータ"],["Seasons End","xkb97x-seasons-end","メタデータ"],["Federico Inchausti","federico-inchausti","メタデータ"],["DISTANTE","federico-inchausti","メタデータ"],["Mariscal X","federico-inchausti","メタデータ"],["En El Desierto Fanzine","federico-inchausti","メタデータ"],["Jordan","jordan-miracle","メタデータ"],["Miracle","jordan-miracle","メタデータ"],["memento.","jordan-miracle","メタデータ"],["No Match Records","no-match-records","メタデータ"],["xkenerbx","xkenerbx-seasons-end","メタデータ"],["Ethan","ethan-sin-against-sin","メタデータ"],["SIN AGAINST SIN","ethan-sin-against-sin","メタデータ"],["デレク","favorite-foods-vol15","メタデータ"],["吉川","favorite-foods-vol15","メタデータ"],["TRUE木","favorite-foods-vol14","メタデータ"],["タナベ","favorite-foods-vol14","メタデータ"],["クロス","favorite-foods-vol14","メタデータ"],["カンタ","favorite-foods-vol13","メタデータ"],["Kai","favorite-foods-vol13","メタデータ"],["Mag","favorite-foods-vol13","メタデータ"],["アントン","favorite-foods-vol12","メタデータ"],["K2O","favorite-foods-vol12","メタデータ"],["あたけ","favorite-foods-vol12","メタデータ"],["isao","favorite-foods-vol11","メタデータ"],["太田","favorite-foods-vol11","メタデータ"],["加川大志郎","favorite-foods-vol11","メタデータ"],["北川","favorite-foods-vol11","メタデータ"],["KM","favorite-foods-vol11","メタデータ"],["ZM","five-records","メタデータ"],["Siv","five-records","メタデータ"],["タクヤン","five-records","メタデータ"],["エロリン","five-records","メタデータ"],["Closh","five-records","メタデータ"],["ゆか","five-records","メタデータ"],["CRUNK","yuka","メタデータ"],["HardcoreDays","yuka","メタデータ"],["One Voice Zine","reverse-questions-2021","メタデータ"],["WETNAP","closh-wetnap","メタデータ"],["BURNING SIGN","erorin","メタデータ"],["NODAYSOFF","erorin","メタデータ"],["SMDcrew","erorin","メタデータ"],["INSIDE","xtkx-otus","メタデータ"],["UMBRAGE","xtkx-otus","メタデータ"],["It's For Life Booking","xtkx-otus","メタデータ"],["ASIANBEAUTYMURDER","isao","メタデータ"],["DISTANCE","isao","メタデータ"],["BREAKING POSITION","takuyan","メタデータ"],["Blizzard Framework Joy Ride","takuyan","メタデータ"],["DEAD SOULS","takuyan","メタデータ"],["BLINDSIDE","takuyan","メタデータ"],["16REASONS","siv","メタデータ"],["STILL","siv","メタデータ"],["beyondman","siv","メタデータ"],["unklet","taishiro-kagawa","メタデータ"],["TURNING CENTER","taishiro-kagawa","メタデータ"],["gotta move this site","taishiro-kagawa","メタデータ"],["zamohfied","zamohfied","メタデータ"],["Zen Lunatics","zamohfied","メタデータ"],["mohive her","zamohfied","メタデータ"],["HETH","zamohfied","メタデータ"],["SOILD HATE","zamohfied","メタデータ"],["NEUROSIS","takuyan","記事本文"],["FOUR YEAR STRONG","takuyan","記事本文"],["INTEGRITY","takuyan","記事本文"],["DEAD KENNEDYS","takuyan","記事本文"],["SANTANA","takuyan","記事本文"],["IRON MAIDEN","takuyan","記事本文"],["JUDAS PRIEST","takuyan","記事本文"],["GRAVE DIGGER","takuyan","記事本文"],["GREEN DAY","takuyan","記事本文"],["DAG NASTY","takuyan","記事本文"],["BLACK FLAG","takuyan","記事本文"],["HI-STANDARD","takuyan","記事本文"],["COCOBAT","takuyan","記事本文"],["VICTORY RECORDS","takuyan","記事本文"],["NEXT STEP UP","takuyan","記事本文"],["QUICKSAND","takuyan","記事本文"],["H2O","takuyan","記事本文"],["NYHC","takuyan","記事本文"],["BLAZE OF TERROR","takuyan","記事本文"],["EARTHQUAKE","takuyan","記事本文"],["EDGE OF SPIRIT","erorin","記事本文"],["LASTING FOR ANSWER","erorin","記事本文"],["LAST ONE STANDING","erorin","記事本文"],["LUNA SEA","erorin","記事本文"],["HANG-OUT","erorin","記事本文"],["UP AND COMING","erorin","記事本文"],["GATTACA","erorin","記事本文"],["PIZZA OF DEATH","erorin","記事本文"],["BEYOND HATE","erorin","記事本文"],["HARDCORE BREAKOUT","erorin","記事本文"],["PALM","erorin","記事本文"],["NAIAD","erorin","記事本文"],["INFERNAL REVULSION","erorin","記事本文"],["THEE MICHELLE GUN ELEPHANT","erorin","記事本文"],["BLANKEY JET CITY","erorin","記事本文"],["NOFX","erorin","記事本文"],["RANCID","erorin","記事本文"],["LIMP BIZKIT","erorin","記事本文"],["KORN","erorin","記事本文"],["SECOND TO NONE","erorin","記事本文"],["GATES OF HOPELESS","erorin","記事本文"],["BRAVE OUT","erorin","記事本文"],["MADBALL","erorin","記事本文"],["ALL OUT WAR","erorin","記事本文"],["KRUELTY","erorin","記事本文"],["BIOHAZARD","erorin","記事本文"],["MINOR LEAGUE","xtkx-otus","記事本文"],["THE PROMISE","xtkx-otus","記事本文"],["GIDEON","xtkx-otus","記事本文"],["LOYAL TO THE GRAVE","xtkx-otus","記事本文"],["AT ONE STROKE","xtkx-otus","記事本文"],["CRYSTAL LAKE","xtkx-otus","記事本文"],["GRIDIRON","xtkx-otus","記事本文"],["PAIN OF TRUTH","xtkx-otus","記事本文"],["ECOSTRIKE","xtkx-otus","記事本文"],["CODE ORANGE","xtkx-otus","記事本文"],["STATE CRAFT","xtkx-otus","記事本文"],["BRAHMAN","xtkx-otus","記事本文"],["GOING STEADY","xtkx-otus","記事本文"],["COMEBACK KID","xtkx-otus","記事本文"],["GORILLA BISCUITS","xtkx-otus","記事本文"],["WORLD PEACE","xtkx-otus","記事本文"],["ROTTING OUT","xtkx-otus","記事本文"],["SOUND AND FURY","xtkx-otus","記事本文"],["ENDZWECK","xtkx-otus","記事本文"],["FIGHT IT OUT","xtkx-otus","記事本文"],["ARKANGEL","xtkx-otus","記事本文"],["SICK OF IT ALL","xtkx-otus","記事本文"],["PARKWAY DRIVE","xtkx-otus","記事本文"],["HEAVEN SHALL BURN","xtkx-otus","記事本文"],["VIPER","isao","記事本文"],["ANGRA","isao","記事本文"],["THE FLOOR IS YOURS","isao","記事本文"],["NIGHT RANGER","isao","記事本文"],["HOUND DOG","isao","記事本文"]];
+const VOCAB_KEY='ovz-transcriber-vocab-v25';
+const MAX_VOCAB_IMPORTED=8500;
+const GITHUB_RAW='https://raw.githubusercontent.com/kanjimatsui-cyber/one-voice-zine/main/';
+let vocabImported=[], vocabCorrections=[], vocabSaving=true;
+function normTerm(t){return String(t||'').normalize('NFKC').trim().toLocaleLowerCase();}
+function validTerm(t,limit=100){return typeof t==='string'&&t.trim().length>=2&&t.length<=limit&&!/[\r\n\t]/.test(t);}
+function catalog(){
+  const map=new Map();
+  for(const [term,slug,kind] of OVZ_SEED)map.set(normTerm(term),{term,slug,kind});
+  for(const item of vocabImported){if(!validTerm(item.term))continue;const key=normTerm(item.term);if(!map.has(key))map.set(key,item);}
+  return [...map.values()].sort((a,b)=>a.term.localeCompare(b.term,'ja'));
+}
+function vocabPersist(){
+  try{localStorage.setItem(VOCAB_KEY,JSON.stringify({imported:vocabImported,corrections:vocabCorrections}));vocabSaving=true;}
+  catch{vocabSaving=false;$('termStatus').textContent='辞書を自動保存できません。JSONバックアップを利用してください。';}
+}
+function vocabRestore(){
+ try{const d=JSON.parse(localStorage.getItem(VOCAB_KEY)||'null');if(d){
+   if(Array.isArray(d.imported))vocabImported=d.imported.filter(x=>x&&validTerm(x.term)).slice(0,MAX_VOCAB_IMPORTED);
+   if(Array.isArray(d.corrections))vocabCorrections=d.corrections.filter(x=>x&&validTerm(x.variant,80)&&validTerm(x.correct)&&normTerm(x.variant)!==normTerm(x.correct)).slice(0,500);
+ }}catch{$('termStatus').textContent='保存した辞書を読み込めませんでした。JSONバックアップから復元してください。';}
+ renderVocab();
+}
+function safeLink(x){
+ if(x.kind?.startsWith('CLASSIC')||x.kind?.startsWith('ARCHIVE')){
+   return /^\d{12,25}$/.test(String(x.postId||''))?'https://x.com/knjmti/status/'+x.postId:'https://onevoicezine.online/archive/';
+ }
+ return 'https://onevoicezine.online/interviews/'+encodeURIComponent(x.slug)+'/';
+}
+function renderVocab(){
+ const words=catalog();$('vocabCount').textContent=words.length;$('learnCount').textContent=vocabCorrections.length;
+ const filter=normTerm($('termSearch').value);const filtered=filter?words.filter(x=>normTerm(x.term).includes(filter)):words;
+ const list=$('termList');list.replaceChildren();
+ for(const x of filtered.slice(0,24)){
+   const row=document.createElement('div');row.className='vocab-item';
+   const left=document.createElement('div');left.className='vocab-item-main';
+   const name=document.createElement('strong');name.textContent=x.term;
+   const d=document.createElement('div');d.className='muted';d.textContent=(x.kind||'公開記事')+(Number.isInteger(x.hits)&&x.hits>1?' / '+x.hits+'投稿で検出':'');
+   const link=document.createElement('a');link.href=safeLink(x);
+   link.target='_blank';link.rel='noopener noreferrer';link.textContent=(x.kind?.startsWith('CLASSIC')||x.kind?.startsWith('ARCHIVE'))?' 元の投稿':' 掲載元';
+   d.append(link);left.append(name,d);
+   const choose=document.createElement('button');choose.type='button';choose.textContent='選択';choose.addEventListener('click',()=>{$('correctTerm').value=x.term;$('variantTerm').focus();$('termStatus').textContent='誤認識された表記を入力し、登録してください。';});
+   row.append(left,choose);list.append(row);
+ }
+ if(!filtered.length){const p=document.createElement('p');p.className='muted';p.textContent='一致する掲載語彙がありません。正しい表記を直接登録することもできます。';list.append(p);}
+ if(filtered.length>24){const p=document.createElement('p');p.className='muted';p.textContent='最初の24件を表示（'+filtered.length+'件中）。検索語を絞ってください。';list.append(p);}
+ const learned=$('learnedList');learned.replaceChildren();
+ for(const item of vocabCorrections){
+   const div=document.createElement('div');div.className='vocab-item';
+   const name=document.createElement('div');name.className='vocab-item-main';name.textContent=item.variant+' → '+item.correct;
+   const button=document.createElement('button');button.textContent='削除';button.className='danger';button.addEventListener('click',()=>{vocabCorrections=vocabCorrections.filter(x=>x!==item);vocabPersist();renderVocab();refreshAllHints();});
+   div.append(name,button);learned.append(div);
+ }
+ if(!vocabCorrections.length){const p=document.createElement('p');p.className='muted';p.textContent='まだ学習した表記はありません。';learned.append(p);}
+}
+function addCorrection(variant,correct){
+ variant=String(variant).trim();correct=String(correct).trim();
+ if(!validTerm(variant,80)||!validTerm(correct,100)||normTerm(variant)===normTerm(correct))return '誤認識と正しい表記はそれぞれ2文字以上で、異なる内容にしてください。';
+ const existing=vocabCorrections.find(x=>normTerm(x.variant)===normTerm(variant));
+ if(existing&&normTerm(existing.correct)!==normTerm(correct))return '同じ誤認識に別の補正が登録されています。先に古い登録を削除してください。';
+ if(existing)return 'すでに登録済みです。';
+ vocabCorrections.unshift({variant,correct,createdAt:new Date().toISOString()});
+ if(vocabCorrections.length>500)vocabCorrections.length=500;
+ vocabPersist();renderVocab();refreshAllHints();
+ return '学習しました。今後、誤認識が一致した行に補正候補を表示します。';
+}
+function locateVariant(hay,needle){
+ const a=hay.toLocaleLowerCase(),b=needle.toLocaleLowerCase();let from=0;
+ while(from<a.length){let idx=a.indexOf(b,from);if(idx<0)return -1;
+   if(/^[a-z0-9]/i.test(needle)&&idx>0&&/[a-z0-9]/i.test(hay[idx-1])){from=idx+1;continue;}
+   const tail=idx+needle.length;
+   if(/[a-z0-9]$/i.test(needle)&&tail<hay.length&&/[a-z0-9]/i.test(hay[tail])){from=idx+1;continue;}
+   return idx;
+ }return -1;
+}
+function vocabHints(text){
+ return vocabCorrections.filter(c=>locateVariant(text,c.variant)>=0).slice(0,8);
+}
+function refreshAllHints(){for(const [i,el] of [...log.querySelectorAll('.entry')].entries()){if(rows[i])renderHintUI(rows[i],el,el.querySelector('textarea'));}}
+function deriveDiff(before,after){
+ if(!before||before===after)return null;
+ let a=0;while(a<before.length&&a<after.length&&before[a]===after[a])a++;
+ let b=before.length,c=after.length;while(b>a&&c>a&&before[b-1]===after[c-1]){b--;c--;}
+ const x=before.slice(a,b).trim(),y=after.slice(a,c).trim();
+ return validTerm(x,80)&&validTerm(y,100)&&normTerm(x)!==normTerm(y)?{variant:x,correct:y}:null;
+}
+function renderHintUI(row,entry,textarea){
+ let hints=entry.querySelector('.vocab-hints');if(hints)hints.remove();
+ let learn=entry.querySelector('.vocab-learn');if(learn)learn.remove();
+ const matches=vocabHints(row.text);
+ if(matches.length){
+   hints=document.createElement('div');hints.className='vocab-hints';
+   for(const c of matches){
+     const line=document.createElement('div');line.className='vocab-hint';
+     const label=document.createElement('span');label.textContent='辞書候補：'+c.variant+' → '+c.correct;
+     const btn=document.createElement('button');btn.type='button';btn.textContent='候補を反映';
+     btn.addEventListener('click',()=>{
+       const idx=locateVariant(row.text,c.variant);if(idx<0)return;
+       row.asrText??=row.text;
+       row.text=row.text.slice(0,idx)+c.correct+row.text.slice(idx+c.variant.length);
+       row.vocabApplied=[...(row.vocabApplied||[]),{before:c.variant,after:c.correct}];
+       textarea.value=row.text;stats();scheduleSave();renderHintUI(row,entry,textarea);
+     });line.append(label,btn);hints.append(line);
+   }entry.append(hints);
+ }
+ if(typeof row.asrText==='string'&&row.asrText!==row.text){
+   learn=document.createElement('div');learn.className='vocab-learn';const btn=document.createElement('button');btn.type='button';btn.textContent='この修正を辞書に登録';
+   btn.addEventListener('click',()=>{
+     const diff=deriveDiff(row.asrText,row.text);
+     if(diff){$('variantTerm').value=diff.variant;$('correctTerm').value=diff.correct;$('termStatus').textContent='差分を抽出しました。内容を確認して登録してください。';}
+     else{$('variantTerm').value='';$('correctTerm').value='';$('termStatus').textContent='修正範囲が広いため自動抽出しません。単語単位で入力してください。';}
+     $('vocabSection').scrollIntoView({behavior:'auto',block:'start'});$('variantTerm').focus();
+   });learn.append(btn);entry.append(learn);
+ }
+}
+function decodeEntities(str){const d=document.createElement('textarea');d.innerHTML=str;return d.value;}
+function extractPublishedTerms(html,slug){
+  const doc=new DOMParser().parseFromString(html,'text/html');
+  doc.querySelectorAll('script,style,svg,figure,iframe').forEach(n=>n.remove());
+  const content=(doc.body?.textContent||'').replace(/https?:\/\/\S+/g,' ');
+  const hits=content.match(/\b[A-Z][A-Z0-9]{2,}(?:[ &’'\-/][A-Z][A-Z0-9]{1,}){0,3}\b/g)||[];
+  const ignore=new Set(['THE','AND','FOR','THIS','WITH','FROM','ONE VOICE ZINE','OVZ','INTERVIEW','OPEN TALK','SNS','DIY','CD','LP','EP','VHS','BGM','JAPAN','NEW','NICE','THANK YOU','YES','YOU','OUR','NOT','BUT','ALL','YES','THE END']);
+  const found=[];
+  for(const t of hits){const term=t.trim().replace(/\s+/g,' ');if(term.length<3||term.length>52||ignore.has(term)||/^\d/.test(term))continue;found.push({term,slug,kind:'記事本文から抽出（未確認）'});}
+  return found;
+}
+function addPublished(items){
+ const known=new Set(catalog().map(x=>normTerm(x.term)));
+ let n=0;
+ for(const x of items){
+   if(vocabImported.length>=MAX_VOCAB_IMPORTED)break;
+   if(!x||!validTerm(x.term)||!/^[-a-z0-9]+$/i.test(x.slug||''))continue;
+   const k=normTerm(x.term);if(known.has(k))continue;
+   known.add(k);vocabImported.push({term:x.term.trim(),slug:x.slug,kind:x.kind||'公開記事',...((x.kind?.startsWith('CLASSIC')||x.kind?.startsWith('ARCHIVE'))&&/^\d{12,25}$/.test(String(x.postId||''))?{postId:String(x.postId)}:{}),...(Number.isInteger(x.hits)&&x.hits>1?{hits:Math.min(9999,x.hits)}:{})});n++;
+   if(vocabImported.length>=MAX_VOCAB_IMPORTED)break;
+ }return n;
+}
+async function ovzGet(path){
+ const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),12000);
+ try{const r=await fetch(GITHUB_RAW+path,{signal:ctrl.signal,cache:'no-cache'});if(!r.ok)throw Error('HTTP '+r.status);return await r.text();}
+ finally{clearTimeout(timer);}
+}
+async function updateOVZ(){
+ const btn=$('ovzUpdate');if(btn.disabled)return;btn.disabled=true;
+ const st=$('ovzStatus');let ok=0,ng=0,added=0;
+ try{
+  st.textContent='OVZの公開記事一覧を取得中…';
+  const data=JSON.parse(await ovzGet('data/interviews.json'));
+  if(!Array.isArray(data))throw Error('インタビュー一覧の形式が異なります');
+  const metadata=[];
+  for(const x of data){if(!x.slug)continue;
+    for(const kind of ['person','affiliation'])for(const term of String(x[kind]||'').split(/\s*\/\s*|\s*,\s*/)){
+      if(validTerm(term))metadata.push({term:term.trim().replace(/^ex-/i,''),slug:x.slug,kind:'記事メタデータ'});
+    }
+  }
+  added+=addPublished(metadata);let index=0;
+  const tasks=[];
+  for(const x of data.slice(0,80)){
+    if(!x?.slug)continue;
+    if(typeof x.content_file==='string'&&x.content_file.startsWith('/content/interviews/'))tasks.push({slug:x.slug,path:x.content_file.slice(1)});
+    tasks.push({slug:x.slug,path:'content/interviews-en/'+x.slug+'.html'});
+  }
+  async function worker(){while(index<tasks.length){const t=tasks[index++];try{
+    const html=await ovzGet(t.path);added+=addPublished(extractPublishedTerms(html,t.slug));ok++;
+  }catch{ng++;}st.textContent='公開記事を確認中：'+(ok+ng)+' / '+tasks.length+'（新規候補 '+added+' 件）';}}
+  await Promise.all(Array.from({length:3},()=>worker()));
+  vocabPersist();renderVocab();st.textContent='更新完了：'+ok+'本文を確認、新規候補 '+added+' 件、取得失敗 '+ng+' 件。抽出候補は公式表記と断定せず、手動で確認してください。';
+  trace('OVZ語彙更新: 新規 '+added+' 件 / 取得 '+ok+' 件 / 失敗 '+ng+' 件');
+ }catch(err){st.textContent='OVZから取得できませんでした。通信を確認してください。内蔵の語彙候補と保存済み辞書はそのまま利用できます。';trace('OVZ取得失敗: '+String(err?.message||err));}
+ finally{btn.disabled=false;}
+}
+// CLASSIC final import: source is a public data script, parsed as JSON ONLY; never executed.
+// It contains posts from 2026-10-06 through 2026-10-16 JST, not the entire archive.
+function parseClassicFinal(source){
+ const prefix='const additions=';
+ const start=source.indexOf(prefix),end=source.indexOf(';\nconst seen=',start);
+ if(start<0||end<0||end-start>1500000)throw Error('CLASSICデータの形式が異なります');
+ const posts=JSON.parse(source.slice(start+prefix.length,end));
+ if(!Array.isArray(posts)||posts.length>2000)throw Error('CLASSIC投稿一覧の形式が不正です');
+ return posts.filter(p=>p&&/^\d{12,25}$/.test(String(p.id||''))&&typeof p.full_text==='string');
+}
+function extractClassicCandidates(posts){
+ const deny=new Set(['THE','AND','FOR','THIS','WITH','FROM','SNS','DIY','CD','LP','EP','VHS','BGM','JAPAN','NEW','ONE VOICE ZINE','OVZ','US','CA','IN','NO','TO','OR','MY','THE END','OCT','HTTP','HTTPS','WWW']);
+ const items=[];
+ for(const post of posts){
+   if(post.lang==='zxx')continue;
+   const body=post.full_text.replace(/https?:\/\/\S+/g,' ');
+   const groups=[...(body.match(/\b[A-Z][A-Z0-9]{2,}(?:[ &/\-][A-Z][A-Z0-9]{1,}){0,3}\b/g)||[]),
+                 ...(body.match(/\b[A-Z][a-z]{2,}(?:\s+(?:[A-Z][a-z]{2,}|To|The|Of|In|For|And)){1,4}\b/g)||[])];
+   const unique=new Set();
+   for(let raw of groups){
+     const term=raw.trim().replace(/\s+/g,' ');
+     if(!validTerm(term)||term.length>58||deny.has(term.toUpperCase())||/^\d/.test(term)||unique.has(term.toLowerCase()))continue;
+     unique.add(term.toLowerCase());
+     items.push({term,slug:'classic',postId:String(post.id),kind:'CLASSIC本文から抽出（未確認）'});
+   }
+ }
+ return items;
+}
+async function updateClassic(){
+ const btn=$('classicUpdate');if(btn.disabled)return;btn.disabled=true;
+ const st=$('classicStatus');
+ try{
+   st.textContent='CLASSIC最終追加データを取得中…';
+   const raw=await ovzGet('assets/ovz-classic-final-20261016.js');
+   const posts=parseClassicFinal(raw);
+   const candidates=extractClassicCandidates(posts);
+   const added=addPublished(candidates);
+   vocabPersist();renderVocab();
+   st.textContent='CLASSIC：'+posts.length+'投稿から'+candidates.length+'件を抽出、新規'+added+'件を追加しました（重複除外）。対象は2026/10/6〜16の追加分のみ。表記は未確認候補です。';
+   trace('OVZ CLASSIC更新: '+posts.length+'投稿 / 新規 '+added+' 件');
+ }catch(e){
+   st.textContent='CLASSICデータを取得・解析できませんでした：'+String(e?.message||e)+'。既存の辞書は変更していません。';
+   trace('OVZ CLASSIC取得失敗: '+String(e?.message||e));
+ }finally{btn.disabled=false;}
+}
+// Fetch full OVZ CLASSIC archive by loading the same three published scripts as /archive/.
+// The scripts run ONLY in an ephemeral sandboxed iframe with an opaque origin; no transcripts,
+// audio, or storage data are sent to it. It returns a bounded candidate list by postMessage.
+// This avoids assuming the 6.6MB main dataset is a JSON literal and preserves compatibility
+// with the site's existing window.OVZ_POSTS bootstrap format.
+function archiveFrameDocument(nonce){
+ const tag='scr'+'ipt', close='</'+tag+'>';
+ const source='https://onevoicezine.online/assets/';
+ const scripts=[
+  'ovz-data.js',
+  'ovz-data-updates.js?v=20261005',
+  'ovz-classic-final-20261016.js?v=20261018'
+ ];
+ const start='<!doctype html><html><head><meta charset="utf-8"></head><body>'+
+   '<'+tag+'>window.OVZ_POSTS=[];window.__ovzArchiveErrors=[];'+close;
+ const ext=scripts.map(x=>'<'+tag+' src="'+source+x+'" onerror="window.__ovzArchiveErrors.push(this.src)">'+close).join('');
+ const run='('+archiveFrameExtractor.toString()+')('+JSON.stringify(nonce)+');';
+ return start+ext+'<'+tag+'>'+run+close+'</body></html>';
+}
+function archiveFrameExtractor(nonce){
+ 'use strict';
+ const report=(type,data)=>parent.postMessage({channel:'OVZ_FULL_ARCHIVE',nonce,type,...data},'*');
+ const posts=Array.isArray(window.OVZ_POSTS)?window.OVZ_POSTS:[];
+ const errors=Array.isArray(window.__ovzArchiveErrors)?window.__ovzArchiveErrors:[];
+ if(errors.length){report('error',{message:'公開データを読み込めませんでした：'+errors.map(x=>x.split('/').pop()).join(', ')});return;}
+ if(posts.length<50){report('error',{message:'アーカイブの投稿配列を取得できませんでした（'+posts.length+'件）。'});return;}
+ const blacklist=new Set([
+  'THE','AND','FOR','THIS','WITH','FROM','SNS','DIY','CD','LP','EP','VHS','BGM','JAPAN','NEW','ONE VOICE ZINE','OVZ','US','CA','IN','NO','TO','OR','MY','THE END','OCT','HTTP','HTTPS','WWW',
+  'HARDCORE','PUNK','METAL','EMO','ROCK','LIVE','SHOW','SHOWS','ALBUM','DEMO','PROMO','SPLIT','RECORD','RECORDS','BAND','BANDS',
+  'RELEASE','SINGLE','TRACK','TRACKS','OFFICIAL','NOW','NEXT','JUST','ALL','GOOD','GREAT','BEST','GET','NOT','YES','YOU','THANK YOU','WOW','TODAY',
+  'TOKYO','OSAKA','JAPANESE','ENGLISH','KOREA','KOREAN','USA','UK','NY','NYC','NYHC','USHC','FFO','HC','PV','SXE','DMS','IG','X','TWITTER','BANDCAMP'
+ ]);
+ const uppercase=/\b[A-Z][A-Z0-9]{2,}(?:[ &/'\u2019-][A-Z][A-Z0-9]{1,}){0,3}\b/g;
+ const titlecase=/\b[A-Z][a-z]{2,}(?:\s+(?:[A-Z][a-z]{2,}|To|The|Of|In|For|And)){1,4}\b/g;
+ const found=new Map();let index=0,usable=0,matchedPosts=0;
+ function keep(term){
+   term=term.replace(/\s+/g,' ').replace(/^[- &']+|[- &']+$/g,'').trim();
+   const upper=term.toUpperCase();
+   if(term.length<3||term.length>62||blacklist.has(upper))return false;
+   if(/^\d/.test(term)||/^\w*\d{5,}/.test(term)||/^[A-Z0-9]{2,4}$/.test(term))return false;
+   if(/^(?:https?|tco|www|instagram)$/i.test(term))return false;
+   if(/^\d{4}$/.test(term))return false;
+   return term;
+ }
+ function processPost(p){
+   if(!p||typeof p.full_text!=='string'||!/^\d{12,25}$/.test(String(p.id||''))||p.lang==='zxx')return;
+   usable++;
+   const body=p.full_text.replace(/https?:\/\/\S+|@[A-Za-z0-9_]+|#[A-Za-z0-9_]+/g,' ');
+   const matches=[...(body.match(uppercase)||[]),...(body.match(titlecase)||[])];
+   if(!matches.length)return;
+   let used=0;const perPost=new Set();
+   for(const raw of matches){
+     const term=keep(raw);if(!term)continue;
+     const k=term.normalize('NFKC').toLowerCase();if(perPost.has(k))continue;
+     perPost.add(k);used++;
+     let x=found.get(k);
+     if(!x){x={term,slug:'classic',postId:String(p.id),hits:0};found.set(k,x);}
+     x.hits++;
+   }
+   if(used)matchedPosts++;
+ }
+ function batch(){
+   try{
+     const until=Math.min(index+350,posts.length);
+     for(;index<until;index++)processPost(posts[index]);
+     if(index<posts.length){
+       if(index%1400<350)report('progress',{processed:index,total:posts.length,found:found.size});
+       setTimeout(batch,0);return;
+     }
+     const terms=[...found.values()].sort((a,b)=>b.hits-a.hits || b.term.length-a.term.length || a.term.localeCompare(b.term,'ja'));
+     const selected=terms.slice(0,7500).map(x=>({term:x.term,slug:'classic',postId:x.postId,hits:x.hits,kind:x.hits>1?'ARCHIVE複数投稿から抽出（未確認）':'ARCHIVE本文から抽出（未確認）'}));
+     report('ready',{posts:posts.length,usable,matchedPosts,distinct:found.size,candidates:selected,limit:7500});
+   }catch(err){report('error',{message:String(err?.message||err)});}
+ }
+ report('progress',{processed:0,total:posts.length,found:0});
+ setTimeout(batch,0);
+}
+async function updateFullArchive(){
+ const btn=$('fullArchiveUpdate'),st=$('fullArchiveStatus');
+ if(btn.disabled)return;btn.disabled=true;
+ st.textContent='全アーカイブの読み込みを開始します。公開サイトの3ファイル（合計約6.7MB）を取得中…';
+ const frame=document.createElement('iframe');frame.hidden=true;frame.setAttribute('aria-hidden','true');
+ frame.setAttribute('sandbox','allow-scripts');frame.referrerPolicy='no-referrer';
+ const nonce='ovz-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+ let finished=false;let timeout;
+ function cleanup(){window.removeEventListener('message',receive);clearTimeout(timeout);frame.remove();btn.disabled=false;}
+ function finish(msg){if(finished)return;finished=true;cleanup();st.textContent=msg;trace('OVZ全アーカイブ: '+msg);}
+ function receive(ev){
+   if(finished||ev.source!==frame.contentWindow)return;
+   const m=ev.data;
+   if(!m||m.channel!=='OVZ_FULL_ARCHIVE'||m.nonce!==nonce)return;
+   if(m.type==='error'){finish('全アーカイブを取得できませんでした：'+String(m.message||'不明なエラー')+'。既存の辞書は維持しています。');return;}
+   if(m.type==='progress'){st.textContent='全アーカイブを解析中：'+m.processed+' / '+m.total+'投稿、抽出候補 '+m.found+'種類';return;}
+   if(m.type!=='ready'||!Array.isArray(m.candidates))return;
+   if(m.candidates.length>7500||m.posts<50||m.distinct<0){finish('アーカイブの検査に失敗しました。既存辞書は維持しています。');return;}
+   const items=m.candidates.filter(x=>x&&validTerm(x.term,100)&&x.slug==='classic'&&/^\d{12,25}$/.test(String(x.postId||'')));
+   const previous=vocabImported.slice();
+   const added=addPublished(items);
+   vocabPersist();
+   if(!vocabSaving){vocabImported=previous;renderVocab();finish('保存容量が不足したため新規取り込みを取り消しました。既存の辞書をバックアップし、空き容量を確認してください。');return;}
+   renderVocab();
+   finish('処理済み '+m.posts+'投稿（本文あり '+m.usable+'件）/ 抽出 '+m.distinct+'種類 / 保存対象 '+items.length+'候補 / 新規 '+added+'件。重複は除外。候補の表記は未確認で、認識本文の自動置換はしません。');
+ }
+ window.addEventListener('message',receive);
+ timeout=setTimeout(()=>finish('時間内に読み込めませんでした。回線状況を確認して再試行してください。既存辞書は維持しています。'),180000);
+ document.body.append(frame);
+ frame.srcdoc=archiveFrameDocument(nonce);
+}
+$('fullArchiveUpdate').addEventListener('click',updateFullArchive);
+
+$('classicUpdate').addEventListener('click',updateClassic);
+
+$('termSearch').addEventListener('input',renderVocab);
+$('termSave').addEventListener('click',()=>{
+ const res=addCorrection($('variantTerm').value,$('correctTerm').value);
+ $('termStatus').textContent=res;
+ if(res.startsWith('学習しました')){$('variantTerm').value='';$('correctTerm').value='';}
+});
+$('ovzUpdate').addEventListener('click',updateOVZ);
+$('vocabExport').addEventListener('click',()=>{
+ const data=JSON.stringify({format:'ovz-transcriber-vocab',version:1,exportedAt:new Date().toISOString(),imported:vocabImported,corrections:vocabCorrections},null,2);
+ const url=URL.createObjectURL(new Blob([data],{type:'application/json;charset=utf-8'}));
+ const a=document.createElement('a');a.href=url;a.download='ovz-vocabulary-backup.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+});
+$('vocabImport').addEventListener('change',async e=>{
+ const f=e.target.files?.[0];if(!f)return;
+ try{
+   if(f.size>4500000)throw Error('ファイルが大きすぎます');
+   const obj=JSON.parse(await f.text());if(obj?.format!=='ovz-transcriber-vocab'||obj?.version!==1||!Array.isArray(obj.imported)||!Array.isArray(obj.corrections))throw Error('辞書バックアップではありません');
+   const imported=obj.imported.filter(x=>x&&validTerm(x.term)&&/^[-a-z0-9]+$/i.test(x.slug||'')).slice(0,MAX_VOCAB_IMPORTED);
+   const corrections=obj.corrections.filter(x=>x&&validTerm(x.variant,80)&&validTerm(x.correct)&&normTerm(x.variant)!==normTerm(x.correct)).slice(0,500);
+   vocabImported=imported;vocabCorrections=corrections;vocabPersist();renderVocab();refreshAllHints();$('termStatus').textContent='辞書を復元しました。'+corrections.length+'件の学習済み対応を読み込みました。';
+ }catch(err){$('termStatus').textContent='復元できませんでした：'+String(err.message||err);}finally{e.target.value='';}
+});
+
+$('build').textContent=BUILD;
+let selected=null,active=null,rows=[],sourceName='',clearTimer=null,clearDeadline=0,saveTimer=null;
+let storageOK=true,cacheWarning=false;
+const traceLines=[];
+function trace(message){traceLines.push(new Date().toLocaleTimeString('ja-JP')+' '+String(message));if(traceLines.length>400)traceLines.shift();$('trace').textContent='BUILD '+BUILD+'\n'+traceLines.join('\n');}
+window.addEventListener('error',e=>{trace('JavaScript: '+(e.message||'読み込みエラー'));$('diagnostic').open=true;});
+window.addEventListener('unhandledrejection',e=>{trace('非同期エラー: '+String(e.reason?.message??e.reason));$('diagnostic').open=true;});
+const input=$('file'),log=$('log'),exportButtons=[...document.querySelectorAll('[data-export]')];
+const ua=navigator.userAgent;
+const ios=/iPhone|iPad|iPod/i.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const safari=ios||(/Safari/i.test(ua)&&!/Chrome|Chromium|Edg|OPR|Android/i.test(ua));
+if(safari){$('execution').value='wasm';if(ios)$('model').value='base';}
+if(location.protocol==='file:')$('runner').value='direct';
+$('compat').textContent=location.protocol!=='https:'&&location.hostname!=='localhost'?'HTTPS での起動を推奨します。iPhone の「ファイル」プレビューでは実行できません。':ios?'iPhone / iPad：base と WASM を推奨します。メモリ不足の場合は tiny、精度不足の場合は small を試してください。':'音声データは端末内で処理します。';
+if(typeof navigator.share==='function'&&typeof navigator.canShare==='function')document.querySelector('[data-export="share"]').hidden=false;
+function status(text,error=false){$('status').textContent=text;$('status').classList.toggle('error',error);}
+function size(n){return n>=1048576?(n/1048576).toFixed(1)+' MiB':(n/1024).toFixed(1)+' KiB';}
+function time(s){const n=Math.max(0,Math.floor(s));return String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');}
+function subtime(s){
+  const n=Math.max(0,Math.round(s*1000)),pad=(v,k=2)=>String(v).padStart(k,'0');
+  return pad(Math.floor(n/3600000))+':'+pad(Math.floor(n/60000)%60)+':'+pad(Math.floor(n/1000)%60)+','+pad(n%1000,3);
+}
+function stats(){
+  const text=rows.map(r=>r.text).join('\n');
+  $('lines').textContent=rows.length;$('chars').textContent=[...text.replace(/\s/gu,'')].length.toLocaleString('ja-JP');
+  $('words').textContent=(text.match(/[A-Za-z]+(?:['’\-][A-Za-z]+)*/g)||[]).length.toLocaleString('ja-JP');
+  $('warnings').textContent=rows.filter(r=>r.flags?.length).length;
+  $('empty').hidden=rows.length>0;sync();
+}
+function sync(){
+  const busy=!!active;
+  $('start').disabled=busy;$('stop').disabled=!busy||!!active?.cancelled;
+  $('comparePreset').disabled=busy;
+  $('rangeStart').disabled=busy;$('rangeEnd').disabled=busy;$('customRange').hidden=$('scope').value!=='custom';
+  input.disabled=busy;$('model').disabled=busy;$('language').disabled=busy;$('execution').disabled=busy;$('runner').disabled=busy;$('scope').disabled=busy;
+  $('drop').classList.toggle('disabled',busy);
+  $('clear').disabled=busy||!rows.length;
+  for(const b of exportButtons)b.disabled=!rows.length;
+}
+function save(){
+  clearTimeout(saveTimer);saveTimer=null;
+  try{localStorage.setItem(KEY,JSON.stringify({rows,sourceName}));storageOK=true;}
+  catch{storageOK=false;}
+  $('saveState').textContent=storageOK?'自動保存：端末内に保存済み':'自動保存できません。ファイルとして保存してください。';
+}
+function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(save,250);}
+function addRow(row){
+  rows.push(row);
+  const entry=document.createElement('div');entry.className='entry';
+  const meta=document.createElement('div');meta.className='meta';
+  const clock=document.createElement('time');clock.textContent=time(row.start);clock.title=subtime(row.start)+' → '+subtime(row.end);
+  const chip=document.createElement('span');chip.className='chip';chip.textContent=row.lang;
+  meta.append(clock,chip);
+  const text=document.createElement('textarea');text.value=row.text;text.rows=2;text.spellcheck=false;text.setAttribute('aria-label',time(row.start)+' の文字起こし');
+  text.addEventListener('input',()=>{row.text=text.value;stats();scheduleSave();renderHintUI(row,entry,text);});
+  const del=document.createElement('button');del.className='danger';del.textContent='削除';del.setAttribute('aria-label',time(row.start)+' の行を削除');
+  del.addEventListener('click',()=>{const i=rows.indexOf(row);if(i>=0)rows.splice(i,1);entry.remove();stats();save();});
+  entry.append(meta,text,del);
+  if(Array.isArray(row.flags)&&row.flags.length){const warning=document.createElement('div');warning.className='warning';warning.textContent='要確認：'+row.flags.join(' / ');entry.append(warning);}
+  if(typeof row.initialRaw==='string'){const d=document.createElement('details');d.style.gridColumn='2 / -1';const title=document.createElement('summary');title.textContent='再認識前の原出力';const raw=document.createElement('p');raw.textContent=row.initialRaw||'（空出力）';raw.style.overflowWrap='anywhere';d.append(title,raw);entry.append(d);}
+  if(typeof row.raw==='string'&&row.raw){const d=document.createElement('details');d.style.gridColumn='2 / -1';const summary=document.createElement('summary');summary.textContent='認識不良時の原出力（参考）';const raw=document.createElement('p');raw.textContent=row.raw;raw.style.overflowWrap='anywhere';d.append(summary,raw);entry.append(d);}
+  log.append(entry);
+  if(typeof row.asrText!=='string')row.asrText=row.text;
+  renderHintUI(row,entry,text);
+}
+function restore(){
+  try{
+    const data=JSON.parse(localStorage.getItem(KEY)||'null');
+    if(data&&Array.isArray(data.rows)){
+      sourceName=typeof data.sourceName==='string'?data.sourceName:'';
+      for(const r of data.rows){if(r&&Number.isFinite(r.start)&&Number.isFinite(r.end)&&r.start>=0&&r.end>=r.start&&typeof r.text==='string'&&['JA','EN'].includes(r.lang))addRow(r);}
+    }
+    $('saveState').textContent=rows.length?'自動保存：前回の結果を復元しました':'自動保存：有効';
+  }catch{storageOK=false;$('saveState').textContent='保存済みデータを読み込めません。ファイル保存をご利用ください。';}
+  stats();
+}
+function selectFile(f){
+  if(active||!f)return;
+  if(f.size===0){selected=null;$('fileName').textContent='選択したファイルは空です。';status('空のファイルは読み込めません。別の音声ファイルを選択してください。',true);sync();return;}
+  selected=f;$('fileName').textContent='選択済み：'+f.name+' · '+size(f.size);
+  status(rows.length?'音声は選択済みです。開始するには、既存の結果を保存してクリアしてください。':'音声ファイルを選択しました。「文字起こしを開始」を押してください。');sync();
+}
+input.addEventListener('change',()=>{selectFile(input.files?.[0]);});
+input.addEventListener('input',()=>{selectFile(input.files?.[0]);});
+for(const name of ['dragenter','dragover','dragleave','drop'])$('drop').addEventListener(name,e=>{
+  e.preventDefault();if(active)return;
+  $('drop').classList.toggle('drag',name==='dragenter'||name==='dragover');
+  if(name==='drop'){const f=e.dataTransfer?.files?.[0];if(f){input.value='';selectFile(f);}else status('音声ファイルをドロップしてください。',true);}
+});
+window.addEventListener('dragover',e=>e.preventDefault());window.addEventListener('drop',e=>e.preventDefault());
+function readAudioFile(file){
+  if(typeof file.arrayBuffer==='function')return file.arrayBuffer();
+  return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error||new Error('ファイル読み込み失敗'));reader.readAsArrayBuffer(file);});
+}
+function decodeBuffer(ctx,buffer){
+  return new Promise((resolve,reject)=>{try{const result=ctx.decodeAudioData(buffer,resolve,reject);if(result&&typeof result.then==='function')result.then(resolve,reject);}catch(e){reject(e);}});
+}
+function renderOffline(ctx){
+  return new Promise((resolve,reject)=>{ctx.oncomplete=e=>resolve(e.renderedBuffer);try{const result=ctx.startRendering();if(result&&typeof result.then==='function')result.then(resolve,reject);}catch(e){reject(e);}});
+}
+async function decode(file){
+  trace('AudioContext: デコード開始');
+  const Audio=window.AudioContext||window.webkitAudioContext;
+  const Offline=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+  if(!Audio||!Offline)throw new Error('Web Audio API が利用できません');
+  let ctx;
+  try{ctx=new Audio({sampleRate:16000});}catch{ctx=new Audio();}
+  let decoded;
+  try{decoded=await decodeBuffer(ctx,await readAudioFile(file));}finally{try{const closing=ctx.close();if(closing)closing.catch(()=>{});}catch{}}
+  const length=Math.max(1,Math.ceil(decoded.duration*16000));
+  trace('デコード成功: '+decoded.duration.toFixed(1)+'秒、'+decoded.numberOfChannels+'ch');
+  status('音声を16 kHzモノラルに変換中。');
+  const offline=new Offline(1,length,16000);
+  const node=offline.createBufferSource();node.buffer=decoded;node.connect(offline.destination);node.start();
+  const rendered=await renderOffline(offline);return new Float32Array(rendered.getChannelData(0));
+}
+function progress(done,total){$('progress').value=total?100*done/total:0;$('detail').textContent=done+' / '+total;}
+function finish(job,message,error=false){
+  if(active!==job)return;
+  clearTimeout(job.timer);clearInterval(job.watch);job.worker?.terminate();if(job.url)URL.revokeObjectURL(job.url);active=null;trace('BUILD '+BUILD+' / '+message);status(message,error);if(error)$('diagnostic').open=true;save();sync();
+}
+function failure(stage){
+  return ({language:'自動判定できませんでした。音声の言語を日本語または英語に指定して再試行してください。',gpu:'large-v3-turbo には WebGPU が必要です。tiny / base / small を選んでください。',
+    model:'モデルを読み込めませんでした。ネットワーク接続と空き容量を確認するか、別のモデルを試してください。',
+    memory:'メモリ不足の可能性があります。録音を分割するか、tiny / base モデルを試してください。',
+    inference:'文字起こしに失敗しました。長い録音は分割するか、tiny / base モデルを試してください。'})[stage]||'処理に失敗しました。';
+}
+function onEngine(job,m){
+  if(active!==job||job.cancelled)return;
+  job.last=Date.now();
+  switch(m.type){
+    case 'plan':progress(0,m.total);trace('分割完了: '+m.total+'区間');status('音声を分割しました。');break;
+    case 'stage':trace(m.message);status(m.message+'。');$('progress').removeAttribute('value');break;
+    case 'debug':trace(m.message);break;
+    case 'backend':$('backend').textContent='実行方式：'+(m.device==='webgpu'?'WebGPU':'WASM（q8）');trace('モデル実行方式: '+m.device);status('モデルを準備しています。');break;
+    case 'cacheWarning':cacheWarning=true;$('backend').textContent+=' / モデルキャッシュ不可';trace('キャッシュを利用できません');break;
+    case 'fallback':trace('WebGPU → WASM');status('WebGPU から WASM に切り替えています。');break;
+    case 'download':{
+      const percent=m.total?Math.min(100,100*m.loaded/m.total):null;
+      if(percent===null)$('progress').removeAttribute('value');else $('progress').value=percent;
+      $('detail').textContent=(percent===null?'取得中':percent.toFixed(1)+'%')+' · '+size(m.loaded)+(m.total?' / '+size(m.total):'');
+      status('モデルを取得・準備中（容量は判明分）'+(cacheWarning?'。キャッシュ不可。':'。'));break;
+    }
+    case 'working':progress(m.done,m.total);trace('推論開始: '+(m.done+1)+' / '+m.total);status('文字起こしを実行しています。');break;
+    case 'chunk':job.done=m.done;for(const r of m.rows)addRow(r);progress(m.done,m.total);stats();save();status('文字起こし中。無音：'+m.skipped+' / 反復再認識：'+m.retried+' / 空出力再認識：'+m.emptyRetried+' / 認識不良：'+m.flagged+' / 警告行：'+m.warningCount);break;
+    case 'complete':progress(m.total,m.total);finish(job,'完了。無音：'+m.skipped+' / 反復再認識：'+m.retried+' / 空出力再認識：'+m.emptyRetried+' / 空出力・静音判定：'+m.emptyQuiet+' / 認識不良：'+m.flagged+' 行 / 警告行：'+m.warningCount+' 行。警告0でも正確性は未保証。');break;
+    case 'failed':if(m.message)trace(m.message);finish(job,failure(m.stage),true);break;
+  }
+}
+async function direct(job,audio,settings){
+  if(active!==job)return;
+  job.direct=true;trace('直接実行: Web Worker なし');status('認識エンジンを起動しています。');
+  try{await createEngine((type,data={})=>onEngine(job,{type,...data}),()=>job.cancelled).run({audio,...settings});}
+  catch(e){trace(String(e?.message??e));if(!job.cancelled)finish(job,failure('inference'),true);}
+  finally{if(active===job)finish(job,job.cancelled?'中止しました。確定済みの結果は残しています。':'処理が終了しました。');}
+}
+function workerStart(job,audio,settings){
+  const fallback=message=>{
+    if(active!==job||job.direct)return;
+    trace(message);clearTimeout(job.timer);job.worker?.terminate();job.worker=null;
+    if(job.url){URL.revokeObjectURL(job.url);job.url=null;}
+    if(job.sent){finish(job,'認識処理が停止しました。実行場所を「直接実行（予備）」に変更し、tiny で再試行してください。',true);return;}
+    direct(job,audio,settings);
+  };
+  try{
+    const code='const createEngine='+createEngine.toString()+'; const engine=createEngine((type,data={})=>self.postMessage({type,...data})); self.onmessage=e=>engine.run(e.data);self.postMessage({type:"ready"});';
+    job.url=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));
+    job.worker=new Worker(job.url,{type:'module'});
+    job.worker.onmessage=({data:m})=>{
+      if(active!==job||job.direct)return;
+      if(m.type==='ready'){
+        clearTimeout(job.timer);trace('Worker 起動成功');job.sent=true;
+        try{job.worker.postMessage({audio,...settings},[audio.buffer]);}catch(e){job.sent=false;fallback('Worker への音声転送失敗: '+e.message);}
+      }else onEngine(job,m);
+    };
+    job.worker.onerror=e=>{e.preventDefault();fallback('Worker 起動・実行エラー: '+(e.message||'詳細なし'));};
+    job.timer=setTimeout(()=>fallback('Worker 起動がタイムアウト'),8000);
+  }catch(e){fallback('Worker を作成できません: '+e.message);}
+}
+$('comparePreset').addEventListener('click',()=>{
+  if(active)return;
+  $('model').value='small';$('language').value='ja';$('execution').value='wasm';
+  $('runner').value='worker';$('scope').value='60';sync();
+  status(rows.length?'比較設定を適用しました。前回の結果をTXTで保存し、クリアしてから開始してください。':'比較設定を適用しました。small / 日本語 / WASM / Worker / 冒頭60秒。');
+  trace('比較設定: small / ja / wasm / worker / 60秒');
+});
+$('scope').addEventListener('change',sync);
+function parseClock(value){
+  const m=String(value).trim().match(/^(\d{1,5}):([0-5]\d)$/);
+  return m?Number(m[1])*60+Number(m[2]):NaN;
+}
+$('start').addEventListener('click',async()=>{
+  if(active)return;
+  if(!selected&&input.files?.[0])selectFile(input.files[0]);
+  if(!selected){status('先に音声ファイルを選択してください。',true);input.focus();return;}
+  if(typeof WebAssembly==='undefined'){status('この環境では WebAssembly を利用できません。Safari で HTTPS の URL を開いてください。',true);return;}
+  if($('model').value==='turbo'&&$('execution').value==='wasm'){status('large-v3-turbo には WebGPU が必要です。実行方式を自動にするか、tiny / base を選択してください。',true);return;}
+  if(rows.length){status('前回の結果が残っています。保存後にクリアを2回押してから開始してください。',true);$('clear').scrollIntoView({block:'nearest'});$('clear').focus();return;}
+  const custom=$('scope').value==='custom';
+  const from=custom?parseClock($('rangeStart').value):0,to=custom?parseClock($('rangeEnd').value):Infinity;
+  if(custom&&(!Number.isFinite(from)||!Number.isFinite(to)||to<=from)){status('開始・終了を分:秒で入力してください。終了は開始より後にしてください。',true);return;}
+  const job={worker:null,last:Date.now(),cancelled:false};active=job;sourceName=selected.name;cacheWarning=false;sync();
+  traceLines.length=0;trace('BUILD '+BUILD);trace('開始 / '+location.protocol+' / '+selected.name+' / '+size(selected.size));
+  trace('モデル: '+$('model').value+' / 言語: '+$('language').value+' / 方式: '+$('execution').value+' / Secure Context: '+window.isSecureContext);
+  job.watch=setInterval(()=>{if(active===job&&!job.cancelled&&Date.now()-job.last>20000){trace('処理待機中（20秒以上更新なし）');job.last=Date.now();$('diagnostic').open=true;}},5000);
+  progress(0,0);$('progress').removeAttribute('value');status('音声を読み込み、16 kHz モノラルに変換しています。');
+  const settings={model:$('model').value,language:$('language').value,execution:$('execution').value};
+  let audio;
+  try{audio=await decode(selected);trace('16 kHz 変換完了: '+(audio.length/16000).toFixed(1)+'秒');if(custom){const stop=Math.min(audio.length,Math.round(to*16000));const start=Math.round(from*16000);if(start>=stop||to>audio.length/16000){finish(job,'指定範囲が録音の長さを超えています。',true);return;}audio=audio.slice(start,stop);settings.offset=start/16000;trace('範囲試験: '+from+'–'+to+'秒（元音声の時刻、分割境界は全体処理と異なる場合あり）');}else if($('scope').value==='60'&&audio.length>960000){audio=audio.slice(0,960000);trace('精度確認モード: 最初の60秒');}}
+  catch(error){
+    console.error(error);trace(String(error?.message??error));const memory=/memory|allocat|length/i.test(String(error?.message??error));
+    finish(job,memory?failure('memory'):'音声を読み込めませんでした。ファイル形式や破損の有無を確認してください。長い録音は分割して試してください。',true);return;
+  }
+  if(active!==job)return;
+  job.last=Date.now();status('認識エンジンを起動しています。');
+  if($('runner').value==='direct'||location.protocol==='file:')direct(job,audio,settings);else workerStart(job,audio,settings);
+});
+$('stop').addEventListener('click',()=>{
+  if(!active)return;
+  if(active.direct){active.cancelled=true;status('中止を要求しました。現在の処理が戻るまでお待ちください。');sync();}
+  else finish(active,'中止しました。確定済みの結果は残しています。');
+});
+function resetClear(){clearTimeout(clearTimer);clearTimer=null;clearDeadline=0;$('clear').textContent='クリア';}
+$('clear').addEventListener('click',()=>{
+  if(active||!rows.length)return;
+  if(clearTimer!==null&&Date.now()<=clearDeadline){resetClear();rows=[];sourceName='';log.replaceChildren();stats();save();progress(0,0);status(selected?'結果を消去しました。選択済みの音声で開始できます。':'結果を消去しました。音声ファイルを選択してください。');}
+  else{resetClear();$('clear').textContent='本当に消す';clearDeadline=Date.now()+3500;clearTimer=setTimeout(resetClear,3500);}
+});
+function csvCell(v){
+  let s=String(v);if(/^[\s]*[=+\-@]|^[\t\r\n]/.test(s))s="'"+s;
+  return '"'+s.replace(/"/g,'""')+'"';
+}
+function makeExport(format){
+  const plain=rows.map(r=>'['+time(r.start)+'] '+r.text).join('\n');
+  if(format==='md')return rows.map(r=>'**'+time(r.start)+'** ('+r.lang+')\n\n'+r.text).join('\n\n---\n\n');
+  if(format==='csv')return '\uFEFF'+[['開始','終了','言語','本文','要確認'],...rows.map(r=>[subtime(r.start),subtime(r.end),r.lang,r.text,(r.flags||[]).join(' / ')])].map(r=>r.map(csvCell).join(',')).join('\r\n');
+  if(format==='srt')return rows.filter(r=>r.text.trim()).map((r,i)=>(i+1)+'\n'+subtime(r.start)+' --> '+subtime(Math.max(r.start+0.001,r.end))+'\n'+r.text.trim().replace(/\n\s*\n/g,'\n')).join('\n\n')+'\n';
+  return plain;
+}
+async function copyText(text){
+  try{await navigator.clipboard.writeText(text);return true;}
+  catch{
+    const el=document.createElement('textarea');el.value=text;el.style.position='fixed';el.style.opacity='0';document.body.append(el);el.select();
+    try{return document.execCommand('copy');}catch{return false;}finally{el.remove();}
+  }
+}
+function download(format,text){
+  const mime={txt:'text/plain',md:'text/markdown',csv:'text/csv',srt:'application/x-subrip'}[format];
+  const url=URL.createObjectURL(new Blob([text],{type:mime+';charset=utf-8'}));
+  const anchor=document.createElement('a');anchor.href=url;
+  anchor.download=(sourceName.replace(/\.[^.]+$/,'').replace(/[\\/:*?"<>|]/g,'_')||'transcript')+'.'+format;
+  document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+for(const b of exportButtons)b.addEventListener('click',async()=>{
+  if(!rows.length)return;const f=b.dataset.export,text=makeExport(f==='share'?'txt':f);
+  if(f==='copy')status((await copyText(text))?'コピーしました。':'コピーできませんでした。TXT 保存をご利用ください。');
+  else if(f==='share'){
+    try{const file=new File([makeExport('txt')],(sourceName.replace(/\.[^.]+$/,'')||'transcript')+'.txt',{type:'text/plain;charset=utf-8'});if(navigator.canShare({files:[file]}))await navigator.share({files:[file]});else download('txt',makeExport('txt'));}catch(e){if(e?.name!=='AbortError')status('共有できませんでした。TXT 保存をご利用ください。',true);}
+  }else download(f,text);
+});
+window.addEventListener('pagehide',()=>{if(saveTimer!==null)save();});
+$('copyTrace').addEventListener('click',async()=>{const ok=await copyText('BUILD '+BUILD+'\n'+traceLines.join('\n'));if(!ok)status('診断情報を選択してコピーしてください。');});
+vocabRestore();
+restore();
+trace('画面起動 '+BUILD+': '+location.protocol+' / '+navigator.userAgent);
+status(rows.length?'前回の結果を復元しました。新しい音声は選択できます。開始前に既存の結果を保存してクリアしてください。':'準備完了。音声ファイルを選択してください。');
+</script>
+</body>
+</html>
