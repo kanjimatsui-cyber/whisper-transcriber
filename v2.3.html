@@ -1,0 +1,651 @@
+<!doctype html>
+<!--
+  未検証: Safari / iPhone 実機の Whisper 推論・モデル名と API 引数の組み合わせ。HTTPS 配信を推奨。
+  モデル配布と Transformers.js 3.8.1 の公開仕様は確認済み。
+  音声と文字起こしはブラウザ内で処理し、外部には送信しない設計。
+  改訂 2.1: 明示的な言語指定、試験的な言語トークン検出、反復検出・再認識、base 推奨、60秒試験。
+  自動検出と反復再認識の実機検証は未実施。
+  改訂 2.2: 初回認識の no_repeat_ngram を撤廃（再認識のみ 10）、空出力を正常扱い、無音判定を録音内ノイズ床基準に変更。
+  改訂 2.3: 空出力時に音声活動の有無を再検査し、有音候補のみ短区間で再認識。再び空なら要確認行を残す。再認識は1回のみ。
+  未検証: 2.3 の Safari 実機 Whisper 推論と精度比較。活動量判定は音量・継続時間に基づくヒューリスティックで、発話の確定判定ではない。
+  言語チップは選択または検出した認識言語。無音判定は簡易 RMS 方式。
+-->
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>音声文字起こし</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+JP:wght@400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<style>
+:root {
+  color-scheme: light;
+  --bg:#f5f5f2; --panel:#fff; --ink:#202522; --muted:#5d6661;
+  --line:#d4d9d5; --accent:#285947; --on-accent:#fff;
+  --soft:#e8efeb; --danger:#a33131; --focus:#176d99;
+  --font:'Noto Sans JP',sans-serif; --mono:'IBM Plex Mono',monospace;
+}
+@media(prefers-color-scheme:dark) {
+  :root {color-scheme:dark; --bg:#171b19; --panel:#202623; --ink:#e7ece8;
+    --muted:#a7b2ac; --line:#404a44; --accent:#a4d6bc; --on-accent:#132419;
+    --soft:#2c3932; --danger:#ffaaaa; --focus:#80c8f0;}
+}
+* {box-sizing:border-box}
+body {margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.7 var(--font)}
+main {width:min(100%,760px);margin:auto;padding:32px 16px 56px}
+h1 {font-size:clamp(24px,5vw,34px);margin:0;letter-spacing:-.04em}
+h2 {font-size:18px;margin:0 0 12px}
+p {margin:8px 0}
+.muted,small {color:var(--muted);font-size:12px}
+section {margin-top:22px;padding:18px;border:1px solid var(--line);background:var(--panel);border-radius:8px;min-width:0}
+button,select,textarea {font:inherit;color:inherit}
+button,select {min-height:42px;padding:7px 12px;border:1px solid var(--line);background:var(--panel);border-radius:5px}
+button {cursor:pointer;font-weight:500}
+button:disabled,select:disabled {opacity:.5;cursor:not-allowed}
+button.primary {background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+button.danger {color:var(--danger)}
+:focus-visible {outline:2px solid var(--focus);outline-offset:3px}
+.drop {display:grid;gap:10px;border:1px dashed var(--muted);border-radius:6px;padding:20px 14px;overflow-wrap:anywhere}
+#file {display:block;width:100%;min-width:0;max-width:100%;font:inherit;color:var(--ink);padding:6px 0;cursor:pointer}
+#file::file-selector-button {font:inherit;color:var(--on-accent);background:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:8px 12px;margin-right:10px;cursor:pointer}
+#fileName {overflow-wrap:anywhere}
+.drop.drag {background:var(--soft);border-color:var(--accent)}
+.drop:focus-within {outline:2px solid var(--focus);outline-offset:3px}
+.drop.disabled {opacity:.6;cursor:not-allowed}
+.sr {position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.fields {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:16px 0}
+.fields label {display:grid;gap:5px;min-width:0;font-size:13px;font-weight:500}
+select {width:100%;min-width:0}
+.actions {display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
+progress {width:100%;height:12px;accent-color:var(--accent);display:block;margin:12px 0}
+.status {min-height:26px;overflow-wrap:anywhere}
+.status.error {color:var(--danger)}
+.numbers,time,.chip {font-family:var(--mono);font-variant-numeric:tabular-nums}
+.summary {display:flex;gap:8px 18px;flex-wrap:wrap;color:var(--muted);font-size:13px}
+.log {border-top:1px solid var(--line);margin-top:14px}
+.entry {display:grid;grid-template-columns:65px minmax(0,1fr) auto;gap:8px;align-items:start;border-bottom:1px solid var(--line);padding:13px 0}
+.meta {display:grid;gap:6px;justify-items:start;color:var(--muted);font-size:12px}
+.chip {background:var(--soft);color:var(--accent);padding:1px 5px;border-radius:3px;font-size:11px}
+textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;overflow-wrap:anywhere;border:1px solid var(--line);border-radius:4px;padding:7px;background:var(--panel);line-height:1.65;field-sizing:content}
+.entry button {font-size:12px;padding:4px 7px;min-height:36px}
+#empty {padding:18px 0;color:var(--muted)}
+[hidden] {display:none!important}
+@media(max-width:440px) {
+  button,select,input,textarea {font-size:16px} .entry button {font-size:13px}
+  main {padding:24px 10px 40px} section {padding:12px}
+  .fields {grid-template-columns:1fr}.entry {grid-template-columns:53px minmax(0,1fr) auto;gap:5px}
+}
+@media(prefers-reduced-motion:reduce) {* {scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>音声文字起こし</h1>
+  <p class="muted">Safari 対応版 v2.3</p>
+  <p class="muted">日本語・英語対応。音声は端末内で処理します。</p>
+</header>
+<section aria-labelledby="inputHeading">
+  <h2 id="inputHeading">音声と認識設定</h2>
+  <div class="drop" id="drop">
+    <label for="file"><strong>音声ファイルを選択</strong></label>
+    <input id="file" type="file" aria-describedby="fileName fileHelp">
+    <span class="muted" id="fileHelp">MP3、WAV、M4A など。ここにドロップすることもできます。</span>
+    <span id="fileName" role="status" aria-live="polite">未選択</span>
+  </div>
+  <noscript><p class="status error">JavaScript が無効です。iPhone の「ファイル」内のプレビューではなく、HTTPS の URL を Safari で開いてください。</p></noscript>
+  <div class="fields">
+    <label>認識モデル<select id="model">
+      <option value="tiny">tiny — 起動確認向け（低精度）</option>
+      <option value="base">base — iPhone の標準</option>
+      <option value="small" selected>small — 標準</option>
+      <option value="turbo">large-v3-turbo — WebGPU 必須</option>
+    </select></label>
+    <label>音声の言語<select id="language">
+      <option value="ja" selected>日本語</option><option value="en">英語（English）</option>
+      <option value="auto">自動判定（試験・録音単位）</option>
+    </select></label>
+  </div>
+  <div class="fields"><label>実行方式<select id="execution"><option value="auto">自動（WebGPU 優先）</option><option value="wasm">互換性優先（WASM）</option></select></label><label>実行場所<select id="runner"><option value="worker">バックグラウンド（Worker）</option><option value="direct">直接実行（予備）</option></select></label></div>
+  <div class="fields"><label>処理範囲<select id="scope"><option value="full">音声全体</option><option value="60">最初の60秒だけ（精度確認）</option></select></label></div>
+  <p class="muted">日本語または英語を明示すると誤認識を減らせます。自動判定は最初の有音区間で言語を決めます。</p>
+  <p id="compat" class="muted" role="status">iPhone では HTTPS の URL を Safari で開いてください。ファイルのプレビューでは動作しません。</p>
+  <p id="backend" class="muted">実行時に WebGPU / WASM を判定します。</p>
+  <div class="actions">
+    <button id="comparePreset" type="button">60秒・small の比較設定</button>
+    <button id="start" class="primary" disabled>文字起こしを開始</button>
+    <button id="stop" disabled>中止</button>
+  </div>
+  <progress id="progress" max="100" value="0" aria-label="処理の進捗"></progress>
+  <div id="detail" class="numbers muted">0 / 0</div>
+  <p id="status" class="status" role="status" aria-live="polite">起動確認中。変わらない場合は HTML のプレビューではなく Chrome / Edge で開いてください。</p>
+  <small>モデルの初回取得には通信が必要です。iPhone では短い録音から試してください。既存の結果は保存してからクリアしてください。</small>
+  <details id="diagnostic"><summary>動作状況・エラー詳細</summary><pre id="trace" style="white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;margin:8px 0"></pre><button id="copyTrace" type="button">診断情報をコピー</button></details>
+</section>
+<section aria-labelledby="resultsHeading">
+  <h2 id="resultsHeading">文字起こし結果</h2>
+  <div class="summary"><span>行数 <strong id="lines">0</strong></span><span>文字数 <strong id="chars">0</strong></span><span>英単語数 <strong id="words">0</strong></span></div>
+  <div class="actions" id="exports">
+    <button data-export="copy">コピー</button><button data-export="share" hidden>共有・保存</button><button data-export="txt">TXT</button>
+    <button data-export="md">MD</button><button data-export="csv">CSV</button>
+    <button data-export="srt">SRT</button><button id="clear" class="danger">クリア</button>
+  </div>
+  <p id="saveState" class="muted" role="status">自動保存：確認中</p>
+  <small>各行を直接編集できます。要確認行は、音がある可能性があるのに認識できない区間などです。音量だけでは発話と雑音を完全には区別できません。文字数は空白を除きます。</small>
+  <div id="log" class="log"></div><p id="empty">文字起こし結果はまだありません。</p>
+</section>
+</main>
+<!-- 推論エンジン: Worker と直接実行で共用。 -->
+<script>
+function createEngine(send, cancelled = () => false, importer = url => import(url)) {
+const CDN = 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1';
+const MODELS = {tiny:'onnx-community/whisper-tiny',base:'onnx-community/whisper-base',small:'onnx-community/whisper-small',turbo:'onnx-community/whisper-large-v3-turbo'};
+const SR = 16000, WINDOW = 30*SR, SEARCH = 3*SR;
+let gate={rms:0.004,peak:0.01}; // calibrate() で録音ごとに更新
+const check = () => { if(cancelled()) throw new Error("cancelled"); };
+const yieldUI = () => new Promise(resolve=>setTimeout(resolve,0));
+const clamp = (x,a,b) => Math.max(a,Math.min(b,x));
+function energy(a,s,e) {
+  let sum=0, peak=0;
+  for(let i=s;i<e;i++){const v=a[i];sum+=v*v;peak=Math.max(peak,Math.abs(v));}
+  return {rms:Math.sqrt(sum/Math.max(1,e-s)),peak};
+}
+function plan(a) {
+  const cuts=[]; let s=0;
+  const half=1600, step=320; // 200ms の評価窓 / 20ms 刻み
+  while(s<a.length) {
+    let e=Math.min(s+WINDOW,a.length);
+    if(e<a.length) {
+      let best=Infinity, cut=e;
+      for(let p=e-SEARCH;p<=e;p+=step) {
+        const score=energy(a,Math.max(s,p-half),Math.min(e,p+half)).rms;
+        if(score<=best){best=score;cut=p;}
+      }
+      e=cut;
+    }
+    cuts.push([s,e]);s=e;
+  }
+  return cuts;
+}
+// 録音全体の 20ms フレーム RMS から、ノイズ床（下位10%）と発話水準（上位95%）を求め、有音閾値を相対化する。
+function calibrate(a) {
+  const n=Math.floor(a.length/320);
+  if(n<10){gate={rms:0.004,peak:0.01};return gate;}
+  const f=new Float32Array(n);
+  for(let i=0;i<n;i++)f[i]=energy(a,i*320,i*320+320).rms;
+  f.sort();
+  const floor=f[Math.floor(n*0.10)], top=f[Math.min(n-1,Math.floor(n*0.95))];
+  const rms=Math.min(Math.max(0.0008,floor*2.5),Math.max(0.0008,top*0.5),0.01);
+  gate={rms,peak:rms*2.5};
+  return gate;
+}
+function silent(a,s,e) {
+  let voiced=0;
+  for(let p=s;p<e;p+=320) {
+    const {rms,peak}=energy(a,p,Math.min(e,p+320));
+    if(rms>=gate.rms && peak>=gate.peak && ++voiced>=3) return false;
+  }
+  return true;
+}
+// 空出力の再評価専用。20ms フレームの振幅・持続性を確認する。
+// 正確な音声区間検出(VAD)ではない。迷う場合は「音声候補」として扱い、欠落を見えるようにする。
+function speechCandidate(a,s,e) {
+  const step=320; // 20ms @16kHz
+  const threshold=Math.max(0.0008,Math.min(0.003,gate.rms*0.35));
+  let active=0, run=0, longest=0, highest=0, sum=0, frames=0;
+  for(let p=s;p<e;p+=step){
+    const {rms,peak}=energy(a,p,Math.min(p+step,e));
+    frames++;sum+=rms;highest=Math.max(highest,peak);
+    if(rms>=threshold && peak>=threshold*2){
+      active++;run++;longest=Math.max(longest,run);
+    }else run=0;
+  }
+  // 強い雑音でも活動と判定する可能性があるが、無根拠な欠落より要確認表示を優先する。
+  const candidate=(longest>=8 && active>=12) || (active>=20 && active>=frames*0.12);
+  const uncertain=!candidate && active>=3; // 短い返答を静音として捨てない
+  return {candidate,uncertain,active,frames,longest,rms:sum/Math.max(1,frames),peak:highest};
+}
+// 原区間より短く連続分割し、境界を最後の2秒の静音位置に寄せる。無限再試行しない。
+function shortCuts(a,s,e) {
+  const cuts=[];let left=s;
+  while(left<e){
+    let right=Math.min(left+10*SR,e);
+    if(right<e){
+      let best=Infinity,cut=right;
+      for(let pos=Math.max(left+SR,right-2*SR);pos<=right;pos+=320){
+        const rms=energy(a,Math.max(left,pos-800),Math.min(e,pos+800)).rms;
+        if(rms<=best){best=rms;cut=pos;}
+      }
+      right=cut;
+    }
+    cuts.push([left,right]);left=right;
+  }
+  return cuts;
+}
+function resultRows(output,start,end,lang) {
+  const duration=end-start;
+  const chunks=output?.chunks?.length ? output.chunks : [{text:output?.text,timestamp:[0,duration]}];
+  return chunks.flatMap((c,i)=>{
+    const text=String(c.text??'').trim(); if(!text)return [];
+    const [a,b]=c.timestamp??[];
+    const next=chunks[i+1]?.timestamp?.[0];
+    const from=clamp(Number.isFinite(a)?a:0,0,duration);
+    const to=clamp(Number.isFinite(b)?b:Number.isFinite(next)?next:duration,from,duration);
+    return [{start:start+from,end:start+to,lang:lang.toUpperCase(),text}];
+  });
+}
+// Detect pathological loops, not ordinary isolated repeated words.
+function normalized(text) {return text.normalize('NFKC').toLowerCase().replace(/[\p{P}\p{S}\s]/gu,'');}
+function loopSuspect(output, rows) {
+  const ns=rows.map(r=>normalized(r.text)).filter(Boolean);
+  let run=1;const counts=new Map();
+  for(let i=0;i<ns.length;i++){
+    const n=ns[i];counts.set(n,(counts.get(n)||0)+1);
+    run=i&&n===ns[i-1]?run+1:1;
+    if(run>=4)return true;
+  }
+  if(ns.length>=5&&Math.max(0,...counts.values())>=4&&Math.max(0,...counts.values())/ns.length>=0.6)return true;
+  const full=String(output?.text||rows.map(r=>r.text).join(' '));
+  const words=full.toLowerCase().match(/[a-z0-9]+|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu)||[];
+  for(let k=1;k<=Math.min(20,Math.floor(words.length/5));k++){
+    let streak=0;
+    for(let i=k;i<words.length;i++){
+      streak=words[i]===words[i-k]?streak+1:0;
+      if(streak>=Math.max(12,4*k))return true;
+    }
+  }
+  if(ns.length>=3&&ns.every(n=>/^(inaudible|speakinginforeignlanguage|coughing|laughter|聞き取れない|不明)$/.test(n)))return true;
+  return false;
+}
+async function detectLanguage(pipe,samples) {
+  const cfg=pipe.model.generation_config;
+  if(!cfg?.lang_to_id||!Number.isFinite(cfg.decoder_start_token_id))throw new Error('言語検出設定がありません');
+  const features=await pipe.processor(samples);
+  try {
+    // 3.8.1 does not detect language in the ASR pipeline. Read Whisper's first decoder token instead.
+    const result=await pipe.model.generate({inputs:features.input_features,decoder_input_ids:[cfg.decoder_start_token_id],max_new_tokens:1,return_timestamps:false,do_sample:false,num_beams:1,forced_decoder_ids:null,suppress_tokens:[],begin_suppress_tokens:[],return_dict_in_generate:false});
+    const tokens=(result.sequences??result)[0].tolist();
+    const id=Number(tokens.at(-1));
+    for(const lang of ['ja','en'])if(id===cfg.lang_to_id['<|'+lang+'|>'])return lang;
+    throw new Error('日本語・英語を判定できません (token '+id+')');
+  } finally {try{features.input_features?.dispose?.();}catch{}}
+}
+async function run({audio,model,language,execution}) {
+  check(); calibrate(audio); send('debug',{message:'有音閾値 rms='+gate.rms.toFixed(5)+' peak='+gate.peak.toFixed(5)});
+  const cuts=plan(audio);send('plan',{total:cuts.length});
+  let pipe=null, device='wasm', stage='model', skipped=0, flagged=0, retried=0, emptyRetried=0, emptyQuiet=0;
+  let resolved=language==='auto'?null:language;
+  let library=null;
+  async function release(){if(pipe){try{await pipe.dispose();}catch{}pipe=null;}}
+  async function load(use) {
+    stage='model';device=use;send('backend',{device});
+    if(!library){
+      send('stage',{message:'認識ライブラリを読み込み中'});
+      library=await importer(CDN);check();
+      const {env}=library;env.allowLocalModels=false;
+      if(env.backends?.onnx?.wasm){env.backends.onnx.wasm.numThreads=1;env.backends.onnx.wasm.proxy=false;}
+      try{await caches.open('transformers-cache');env.useBrowserCache=true;}
+      catch{env.useBrowserCache=false;send('cacheWarning');}
+    }
+    check();send('stage',{message:'Whisper モデルを読み込み中'});
+    const files=new Map();
+    const dtype=use==='wasm'?'q8':model==='turbo'?'q4':model==='tiny'?'q8':{encoder_model:'fp32',decoder_model_merged:'q4'};
+    pipe=await library.pipeline('automatic-speech-recognition',MODELS[model],{
+      device:use,dtype,progress_callback(p){
+        if(!p.file)return;
+        const previous=files.get(p.file)??{loaded:0,total:0};
+        if(p.status==='progress')files.set(p.file,{loaded:p.loaded??0,total:p.total??0});
+        else if(p.status==='done')files.set(p.file,{loaded:previous.total||previous.loaded,total:previous.total});
+        else if(!files.has(p.file))files.set(p.file,previous);
+        let loaded=0,total=0;
+        for(const f of files.values()){loaded+=f.loaded;total+=f.total;}
+        send('download',{loaded,total,file:p.file});
+      }
+    });
+    check();send('stage',{message:'モデル準備完了'});
+  }
+  async function wasmFallback(){
+    await release();send('fallback');await load('wasm');
+  }
+  try {
+    let gpu=false;
+    if(execution!=='wasm' && cuts.some(([s,e])=>!silent(audio,s,e))){
+      send('stage',{message:'実行方式を確認中'});
+      try{gpu=!!(await Promise.race([globalThis.navigator?.gpu?.requestAdapter(),new Promise(r=>setTimeout(()=>r(null),5000))]));}catch{}
+    }
+    check();
+    if(model==='turbo'&&!gpu&&cuts.some(([s,e])=>!silent(audio,s,e))){send('failed',{stage:'gpu'});return;}
+    async function recognize(samples,lang,strict=false) {
+      const options={task:'transcribe',language:lang,return_timestamps:true,chunk_length_s:0,do_sample:false,num_beams:1,max_new_tokens:Math.min(440,Math.max(48,Math.ceil(samples.length/SR*14)+16))};
+      if(strict)options.no_repeat_ngram_size=10; // 初回は制限なし。正当な反復を歪めないため、再認識のみ緩く適用
+      try {return await pipe(samples,options);}
+      catch(error){
+        check();if(device!=='webgpu'||model==='turbo')throw error;
+        send('debug',{message:String(error?.message??error)});await wasmFallback();stage='inference';
+        return await pipe(samples,options);
+      }
+    }
+    for(let i=0;i<cuts.length;i++){
+      await yieldUI();check();
+      const [s,e]=cuts[i];let rows=[];
+      if(silent(audio,s,e))skipped++;
+      else {
+        if(!pipe){
+          try{await load(gpu?'webgpu':'wasm');}
+          catch(error){check();if(device!=='webgpu'||model==='turbo')throw error;send('debug',{message:String(error?.message??error)});await wasmFallback();}
+        }
+        stage='inference';send('working',{done:i,total:cuts.length});
+        check();const samples=audio.subarray(s,e);
+        if(!resolved){
+          try{resolved=await detectLanguage(pipe,samples);}
+          catch(error){send('failed',{stage:'language',message:String(error?.message??error)});return;}
+          send('debug',{message:'言語トークン検出: '+resolved});
+        }
+        const output=await recognize(samples,resolved);
+        check();rows=resultRows(output,s/SR,e/SR,resolved);
+        // 初回結果が空の場合でも、音量・持続時間を再評価し、発話候補なら再認識する。
+        const isEmpty=rows.length===0;
+        const isLoop=rows.length>0&&loopSuspect(output,rows);
+        if(isEmpty||isLoop){
+          const signal=isEmpty?speechCandidate(audio,s,e):null;
+          if(isEmpty&&!signal.candidate&&!signal.uncertain){
+            emptyQuiet++;
+            send('debug',{message:'区間 '+(i+1)+'：空出力。音声活動は少なく再認識を省略（RMS平均 '+signal.rms.toFixed(5)+'）'});
+          }else{
+            if(isEmpty){emptyRetried++;send('debug',{message:'区間 '+(i+1)+'：空出力だが音声候補'+(signal.uncertain?'（短音・不確実）':'')+'あり（活動 '+signal.active+'/'+signal.frames+' フレーム）。短区間で1回だけ再認識'});}
+            else{retried++;send('debug',{message:'区間 '+(i+1)+'：反復を検出。短区間で再認識'});}
+            rows=[];
+            for(const [left,right] of shortCuts(audio,s,e)){
+              await yieldUI();check();
+              const evidence=speechCandidate(audio,left,right);
+              if(!evidence.candidate&&!evidence.uncertain){
+                send('debug',{message:'再認識区間 '+(left/SR).toFixed(1)+'–'+(right/SR).toFixed(1)+'秒：音声活動は少ないため省略'});
+                continue;
+              }
+              // 空出力の再認識は自然な繰り返しを抑止しない。反復異常のみ strict を適用。
+              const retry=await recognize(audio.subarray(left,right),resolved,isLoop);
+              check();
+              const candidate=resultRows(retry,left/SR,right/SR,resolved);
+              if(!candidate.length){
+                flagged++;
+                rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：音声候補あり・文字起こしなし］'});
+                send('debug',{message:'再認識区間 '+(left/SR).toFixed(1)+'–'+(right/SR).toFixed(1)+'秒：再度空出力。要確認行を記録'});
+              }else if(loopSuspect(retry,candidate)){
+                flagged++;
+                rows.push({start:left/SR,end:right/SR,lang:resolved.toUpperCase(),text:'［要確認：認識不良］',raw:String(retry?.text||candidate.map(r=>r.text).join(' '))});
+              }else rows.push(...candidate);
+            }
+          }
+        }
+      }
+      send('chunk',{rows,done:i+1,total:cuts.length,skipped,flagged,retried,emptyRetried,emptyQuiet});
+    }
+    send('complete',{skipped,total:cuts.length,flagged,retried,emptyRetried,emptyQuiet});
+  }catch(error){
+    const message=String(error?.message??error);
+    const memory=/out of memory|allocat|memory access|buffer size|device lost/i.test(message);
+    if(!cancelled())send('failed',{stage:memory?'memory':stage,message});
+    console.error(error);
+  }finally{await release();}
+}
+return {run};
+}
+</script>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const KEY='local-whisper-transcript-v1';
+let selected=null,active=null,rows=[],sourceName='',clearTimer=null,clearDeadline=0,saveTimer=null;
+let storageOK=true,cacheWarning=false;
+const traceLines=[];
+function trace(message){traceLines.push(new Date().toLocaleTimeString('ja-JP')+' '+String(message));if(traceLines.length>80)traceLines.shift();$('trace').textContent=traceLines.join('\n');}
+window.addEventListener('error',e=>{trace('JavaScript: '+(e.message||'読み込みエラー'));$('diagnostic').open=true;});
+window.addEventListener('unhandledrejection',e=>{trace('非同期エラー: '+String(e.reason?.message??e.reason));$('diagnostic').open=true;});
+const input=$('file'),log=$('log'),exportButtons=[...document.querySelectorAll('[data-export]')];
+const ua=navigator.userAgent;
+const ios=/iPhone|iPad|iPod/i.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+const safari=ios||(/Safari/i.test(ua)&&!/Chrome|Chromium|Edg|OPR|Android/i.test(ua));
+if(safari){$('execution').value='wasm';if(ios)$('model').value='base';}
+if(location.protocol==='file:')$('runner').value='direct';
+$('compat').textContent=location.protocol!=='https:'&&location.hostname!=='localhost'?'HTTPS での起動を推奨します。iPhone の「ファイル」プレビューでは実行できません。':ios?'iPhone / iPad：base と WASM を推奨します。メモリ不足の場合は tiny、精度不足の場合は small を試してください。':'音声データは端末内で処理します。';
+if(typeof navigator.share==='function'&&typeof navigator.canShare==='function')document.querySelector('[data-export="share"]').hidden=false;
+function status(text,error=false){$('status').textContent=text;$('status').classList.toggle('error',error);}
+function size(n){return n>=1048576?(n/1048576).toFixed(1)+' MiB':(n/1024).toFixed(1)+' KiB';}
+function time(s){const n=Math.max(0,Math.floor(s));return String(Math.floor(n/60)).padStart(2,'0')+':'+String(n%60).padStart(2,'0');}
+function subtime(s){
+  const n=Math.max(0,Math.round(s*1000)),pad=(v,k=2)=>String(v).padStart(k,'0');
+  return pad(Math.floor(n/3600000))+':'+pad(Math.floor(n/60000)%60)+':'+pad(Math.floor(n/1000)%60)+','+pad(n%1000,3);
+}
+function stats(){
+  const text=rows.map(r=>r.text).join('\n');
+  $('lines').textContent=rows.length;$('chars').textContent=[...text.replace(/\s/gu,'')].length.toLocaleString('ja-JP');
+  $('words').textContent=(text.match(/[A-Za-z]+(?:['’\-][A-Za-z]+)*/g)||[]).length.toLocaleString('ja-JP');
+  $('empty').hidden=rows.length>0;sync();
+}
+function sync(){
+  const busy=!!active;
+  $('start').disabled=busy;$('stop').disabled=!busy||!!active?.cancelled;
+  $('comparePreset').disabled=busy;
+  input.disabled=busy;$('model').disabled=busy;$('language').disabled=busy;$('execution').disabled=busy;$('runner').disabled=busy;$('scope').disabled=busy;
+  $('drop').classList.toggle('disabled',busy);
+  $('clear').disabled=busy||!rows.length;
+  for(const b of exportButtons)b.disabled=!rows.length;
+}
+function save(){
+  clearTimeout(saveTimer);saveTimer=null;
+  try{localStorage.setItem(KEY,JSON.stringify({rows,sourceName}));storageOK=true;}
+  catch{storageOK=false;}
+  $('saveState').textContent=storageOK?'自動保存：端末内に保存済み':'自動保存できません。ファイルとして保存してください。';
+}
+function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(save,250);}
+function addRow(row){
+  rows.push(row);
+  const entry=document.createElement('div');entry.className='entry';
+  const meta=document.createElement('div');meta.className='meta';
+  const clock=document.createElement('time');clock.textContent=time(row.start);clock.title=subtime(row.start)+' → '+subtime(row.end);
+  const chip=document.createElement('span');chip.className='chip';chip.textContent=row.lang;
+  meta.append(clock,chip);
+  const text=document.createElement('textarea');text.value=row.text;text.rows=2;text.spellcheck=false;text.setAttribute('aria-label',time(row.start)+' の文字起こし');
+  text.addEventListener('input',()=>{row.text=text.value;stats();scheduleSave();});
+  const del=document.createElement('button');del.className='danger';del.textContent='削除';del.setAttribute('aria-label',time(row.start)+' の行を削除');
+  del.addEventListener('click',()=>{const i=rows.indexOf(row);if(i>=0)rows.splice(i,1);entry.remove();stats();save();});
+  entry.append(meta,text,del);
+  if(typeof row.raw==='string'&&row.raw){const d=document.createElement('details');d.style.gridColumn='2 / -1';const summary=document.createElement('summary');summary.textContent='認識不良時の原出力（参考）';const raw=document.createElement('p');raw.textContent=row.raw;raw.style.overflowWrap='anywhere';d.append(summary,raw);entry.append(d);}
+  log.append(entry);
+}
+function restore(){
+  try{
+    const data=JSON.parse(localStorage.getItem(KEY)||'null');
+    if(data&&Array.isArray(data.rows)){
+      sourceName=typeof data.sourceName==='string'?data.sourceName:'';
+      for(const r of data.rows){if(r&&Number.isFinite(r.start)&&Number.isFinite(r.end)&&r.start>=0&&r.end>=r.start&&typeof r.text==='string'&&['JA','EN'].includes(r.lang))addRow(r);}
+    }
+    $('saveState').textContent=rows.length?'自動保存：前回の結果を復元しました':'自動保存：有効';
+  }catch{storageOK=false;$('saveState').textContent='保存済みデータを読み込めません。ファイル保存をご利用ください。';}
+  stats();
+}
+function selectFile(f){
+  if(active||!f)return;
+  if(f.size===0){selected=null;$('fileName').textContent='選択したファイルは空です。';status('空のファイルは読み込めません。別の音声ファイルを選択してください。',true);sync();return;}
+  selected=f;$('fileName').textContent='選択済み：'+f.name+' · '+size(f.size);
+  status(rows.length?'音声は選択済みです。開始するには、既存の結果を保存してクリアしてください。':'音声ファイルを選択しました。「文字起こしを開始」を押してください。');sync();
+}
+input.addEventListener('change',()=>{selectFile(input.files?.[0]);});
+input.addEventListener('input',()=>{selectFile(input.files?.[0]);});
+for(const name of ['dragenter','dragover','dragleave','drop'])$('drop').addEventListener(name,e=>{
+  e.preventDefault();if(active)return;
+  $('drop').classList.toggle('drag',name==='dragenter'||name==='dragover');
+  if(name==='drop'){const f=e.dataTransfer?.files?.[0];if(f){input.value='';selectFile(f);}else status('音声ファイルをドロップしてください。',true);}
+});
+window.addEventListener('dragover',e=>e.preventDefault());window.addEventListener('drop',e=>e.preventDefault());
+function readAudioFile(file){
+  if(typeof file.arrayBuffer==='function')return file.arrayBuffer();
+  return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(reader.error||new Error('ファイル読み込み失敗'));reader.readAsArrayBuffer(file);});
+}
+function decodeBuffer(ctx,buffer){
+  return new Promise((resolve,reject)=>{try{const result=ctx.decodeAudioData(buffer,resolve,reject);if(result&&typeof result.then==='function')result.then(resolve,reject);}catch(e){reject(e);}});
+}
+function renderOffline(ctx){
+  return new Promise((resolve,reject)=>{ctx.oncomplete=e=>resolve(e.renderedBuffer);try{const result=ctx.startRendering();if(result&&typeof result.then==='function')result.then(resolve,reject);}catch(e){reject(e);}});
+}
+async function decode(file){
+  trace('AudioContext: デコード開始');
+  const Audio=window.AudioContext||window.webkitAudioContext;
+  const Offline=window.OfflineAudioContext||window.webkitOfflineAudioContext;
+  if(!Audio||!Offline)throw new Error('Web Audio API が利用できません');
+  let ctx;
+  try{ctx=new Audio({sampleRate:16000});}catch{ctx=new Audio();}
+  let decoded;
+  try{decoded=await decodeBuffer(ctx,await readAudioFile(file));}finally{try{const closing=ctx.close();if(closing)closing.catch(()=>{});}catch{}}
+  const length=Math.max(1,Math.ceil(decoded.duration*16000));
+  trace('デコード成功: '+decoded.duration.toFixed(1)+'秒、'+decoded.numberOfChannels+'ch');
+  status('音声を16 kHzモノラルに変換中。');
+  const offline=new Offline(1,length,16000);
+  const node=offline.createBufferSource();node.buffer=decoded;node.connect(offline.destination);node.start();
+  const rendered=await renderOffline(offline);return new Float32Array(rendered.getChannelData(0));
+}
+function progress(done,total){$('progress').value=total?100*done/total:0;$('detail').textContent=done+' / '+total;}
+function finish(job,message,error=false){
+  if(active!==job)return;
+  clearTimeout(job.timer);clearInterval(job.watch);job.worker?.terminate();if(job.url)URL.revokeObjectURL(job.url);active=null;trace(message);status(message,error);if(error)$('diagnostic').open=true;save();sync();
+}
+function failure(stage){
+  return ({language:'自動判定できませんでした。音声の言語を日本語または英語に指定して再試行してください。',gpu:'large-v3-turbo には WebGPU が必要です。tiny / base / small を選んでください。',
+    model:'モデルを読み込めませんでした。ネットワーク接続と空き容量を確認するか、別のモデルを試してください。',
+    memory:'メモリ不足の可能性があります。録音を分割するか、tiny / base モデルを試してください。',
+    inference:'文字起こしに失敗しました。長い録音は分割するか、tiny / base モデルを試してください。'})[stage]||'処理に失敗しました。';
+}
+function onEngine(job,m){
+  if(active!==job||job.cancelled)return;
+  job.last=Date.now();
+  switch(m.type){
+    case 'plan':progress(0,m.total);trace('分割完了: '+m.total+'区間');status('音声を分割しました。');break;
+    case 'stage':trace(m.message);status(m.message+'。');$('progress').removeAttribute('value');break;
+    case 'debug':trace(m.message);break;
+    case 'backend':$('backend').textContent='実行方式：'+(m.device==='webgpu'?'WebGPU':'WASM（q8）');trace('モデル実行方式: '+m.device);status('モデルを準備しています。');break;
+    case 'cacheWarning':cacheWarning=true;$('backend').textContent+=' / モデルキャッシュ不可';trace('キャッシュを利用できません');break;
+    case 'fallback':trace('WebGPU → WASM');status('WebGPU から WASM に切り替えています。');break;
+    case 'download':{
+      const percent=m.total?Math.min(100,100*m.loaded/m.total):null;
+      if(percent===null)$('progress').removeAttribute('value');else $('progress').value=percent;
+      $('detail').textContent=(percent===null?'取得中':percent.toFixed(1)+'%')+' · '+size(m.loaded)+(m.total?' / '+size(m.total):'');
+      status('モデルを取得・準備中（容量は判明分）'+(cacheWarning?'。キャッシュ不可。':'。'));break;
+    }
+    case 'working':progress(m.done,m.total);trace('推論開始: '+(m.done+1)+' / '+m.total);status('文字起こしを実行しています。');break;
+    case 'chunk':job.done=m.done;for(const r of m.rows)addRow(r);progress(m.done,m.total);stats();save();status('文字起こし中。無音：'+m.skipped+' / 反復再認識：'+m.retried+' / 空出力再認識：'+m.emptyRetried+' / 要確認：'+m.flagged);break;
+    case 'complete':progress(m.total,m.total);finish(job,'完了。無音：'+m.skipped+' / 反復再認識：'+m.retried+' / 空出力再認識：'+m.emptyRetried+' / 空出力・静音判定：'+m.emptyQuiet+' / 要確認：'+m.flagged+' 行。');break;
+    case 'failed':if(m.message)trace(m.message);finish(job,failure(m.stage),true);break;
+  }
+}
+async function direct(job,audio,settings){
+  if(active!==job)return;
+  job.direct=true;trace('直接実行: Web Worker なし');status('認識エンジンを起動しています。');
+  try{await createEngine((type,data={})=>onEngine(job,{type,...data}),()=>job.cancelled).run({audio,...settings});}
+  catch(e){trace(String(e?.message??e));if(!job.cancelled)finish(job,failure('inference'),true);}
+  finally{if(active===job)finish(job,job.cancelled?'中止しました。確定済みの結果は残しています。':'処理が終了しました。');}
+}
+function workerStart(job,audio,settings){
+  const fallback=message=>{
+    if(active!==job||job.direct)return;
+    trace(message);clearTimeout(job.timer);job.worker?.terminate();job.worker=null;
+    if(job.url){URL.revokeObjectURL(job.url);job.url=null;}
+    if(job.sent){finish(job,'認識処理が停止しました。実行場所を「直接実行（予備）」に変更し、tiny で再試行してください。',true);return;}
+    direct(job,audio,settings);
+  };
+  try{
+    const code='const createEngine='+createEngine.toString()+'; const engine=createEngine((type,data={})=>self.postMessage({type,...data})); self.onmessage=e=>engine.run(e.data);self.postMessage({type:"ready"});';
+    job.url=URL.createObjectURL(new Blob([code],{type:'text/javascript'}));
+    job.worker=new Worker(job.url,{type:'module'});
+    job.worker.onmessage=({data:m})=>{
+      if(active!==job||job.direct)return;
+      if(m.type==='ready'){
+        clearTimeout(job.timer);trace('Worker 起動成功');job.sent=true;
+        try{job.worker.postMessage({audio,...settings},[audio.buffer]);}catch(e){job.sent=false;fallback('Worker への音声転送失敗: '+e.message);}
+      }else onEngine(job,m);
+    };
+    job.worker.onerror=e=>{e.preventDefault();fallback('Worker 起動・実行エラー: '+(e.message||'詳細なし'));};
+    job.timer=setTimeout(()=>fallback('Worker 起動がタイムアウト'),8000);
+  }catch(e){fallback('Worker を作成できません: '+e.message);}
+}
+$('comparePreset').addEventListener('click',()=>{
+  if(active)return;
+  $('model').value='small';$('language').value='ja';$('execution').value='wasm';
+  $('runner').value='worker';$('scope').value='60';
+  status(rows.length?'比較設定を適用しました。前回の結果をTXTで保存し、クリアしてから開始してください。':'比較設定を適用しました。small / 日本語 / WASM / Worker / 冒頭60秒。');
+  trace('比較設定: small / ja / wasm / worker / 60秒');
+});
+$('start').addEventListener('click',async()=>{
+  if(active)return;
+  if(!selected&&input.files?.[0])selectFile(input.files[0]);
+  if(!selected){status('先に音声ファイルを選択してください。',true);input.focus();return;}
+  if(typeof WebAssembly==='undefined'){status('この環境では WebAssembly を利用できません。Safari で HTTPS の URL を開いてください。',true);return;}
+  if($('model').value==='turbo'&&$('execution').value==='wasm'){status('large-v3-turbo には WebGPU が必要です。実行方式を自動にするか、tiny / base を選択してください。',true);return;}
+  if(rows.length){status('前回の結果が残っています。保存後にクリアを2回押してから開始してください。',true);$('clear').scrollIntoView({block:'nearest'});$('clear').focus();return;}
+  const job={worker:null,last:Date.now(),cancelled:false};active=job;sourceName=selected.name;cacheWarning=false;sync();
+  traceLines.length=0;trace('開始 / '+location.protocol+' / '+selected.name+' / '+size(selected.size));
+  trace('モデル: '+$('model').value+' / 言語: '+$('language').value+' / 方式: '+$('execution').value+' / Secure Context: '+window.isSecureContext);
+  job.watch=setInterval(()=>{if(active===job&&!job.cancelled&&Date.now()-job.last>20000){trace('処理待機中（20秒以上更新なし）');job.last=Date.now();$('diagnostic').open=true;}},5000);
+  progress(0,0);$('progress').removeAttribute('value');status('音声を読み込み、16 kHz モノラルに変換しています。');
+  const settings={model:$('model').value,language:$('language').value,execution:$('execution').value};
+  let audio;
+  try{audio=await decode(selected);trace('16 kHz 変換完了: '+(audio.length/16000).toFixed(1)+'秒');if($('scope').value==='60'&&audio.length>960000){audio=audio.slice(0,960000);trace('精度確認モード: 最初の60秒');}}
+  catch(error){
+    console.error(error);trace(String(error?.message??error));const memory=/memory|allocat|length/i.test(String(error?.message??error));
+    finish(job,memory?failure('memory'):'音声を読み込めませんでした。ファイル形式や破損の有無を確認してください。長い録音は分割して試してください。',true);return;
+  }
+  if(active!==job)return;
+  job.last=Date.now();status('認識エンジンを起動しています。');
+  if($('runner').value==='direct'||location.protocol==='file:')direct(job,audio,settings);else workerStart(job,audio,settings);
+});
+$('stop').addEventListener('click',()=>{
+  if(!active)return;
+  if(active.direct){active.cancelled=true;status('中止を要求しました。現在の処理が戻るまでお待ちください。');sync();}
+  else finish(active,'中止しました。確定済みの結果は残しています。');
+});
+function resetClear(){clearTimeout(clearTimer);clearTimer=null;clearDeadline=0;$('clear').textContent='クリア';}
+$('clear').addEventListener('click',()=>{
+  if(active||!rows.length)return;
+  if(clearTimer!==null&&Date.now()<=clearDeadline){resetClear();rows=[];sourceName='';log.replaceChildren();stats();save();progress(0,0);status(selected?'結果を消去しました。選択済みの音声で開始できます。':'結果を消去しました。音声ファイルを選択してください。');}
+  else{resetClear();$('clear').textContent='本当に消す';clearDeadline=Date.now()+3500;clearTimer=setTimeout(resetClear,3500);}
+});
+function csvCell(v){
+  let s=String(v);if(/^[\s]*[=+\-@]|^[\t\r\n]/.test(s))s="'"+s;
+  return '"'+s.replace(/"/g,'""')+'"';
+}
+function makeExport(format){
+  const plain=rows.map(r=>'['+time(r.start)+'] '+r.text).join('\n');
+  if(format==='md')return rows.map(r=>'**'+time(r.start)+'** ('+r.lang+')\n\n'+r.text).join('\n\n---\n\n');
+  if(format==='csv')return '\uFEFF'+[['開始','終了','言語','本文'],...rows.map(r=>[subtime(r.start),subtime(r.end),r.lang,r.text])].map(r=>r.map(csvCell).join(',')).join('\r\n');
+  if(format==='srt')return rows.filter(r=>r.text.trim()).map((r,i)=>(i+1)+'\n'+subtime(r.start)+' --> '+subtime(Math.max(r.start+0.001,r.end))+'\n'+r.text.trim().replace(/\n\s*\n/g,'\n')).join('\n\n')+'\n';
+  return plain;
+}
+async function copyText(text){
+  try{await navigator.clipboard.writeText(text);return true;}
+  catch{
+    const el=document.createElement('textarea');el.value=text;el.style.position='fixed';el.style.opacity='0';document.body.append(el);el.select();
+    try{return document.execCommand('copy');}catch{return false;}finally{el.remove();}
+  }
+}
+function download(format,text){
+  const mime={txt:'text/plain',md:'text/markdown',csv:'text/csv',srt:'application/x-subrip'}[format];
+  const url=URL.createObjectURL(new Blob([text],{type:mime+';charset=utf-8'}));
+  const anchor=document.createElement('a');anchor.href=url;
+  anchor.download=(sourceName.replace(/\.[^.]+$/,'').replace(/[\\/:*?"<>|]/g,'_')||'transcript')+'.'+format;
+  document.body.append(anchor);anchor.click();anchor.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+for(const b of exportButtons)b.addEventListener('click',async()=>{
+  if(!rows.length)return;const f=b.dataset.export,text=makeExport(f==='share'?'txt':f);
+  if(f==='copy')status((await copyText(text))?'コピーしました。':'コピーできませんでした。TXT 保存をご利用ください。');
+  else if(f==='share'){
+    try{const file=new File([makeExport('txt')],(sourceName.replace(/\.[^.]+$/,'')||'transcript')+'.txt',{type:'text/plain;charset=utf-8'});if(navigator.canShare({files:[file]}))await navigator.share({files:[file]});else download('txt',makeExport('txt'));}catch(e){if(e?.name!=='AbortError')status('共有できませんでした。TXT 保存をご利用ください。',true);}
+  }else download(f,text);
+});
+window.addEventListener('pagehide',()=>{if(saveTimer!==null)save();});
+$('copyTrace').addEventListener('click',async()=>{const ok=await copyText(traceLines.join('\n'));if(!ok)status('診断情報を選択してコピーしてください。');});
+restore();
+trace('画面起動 2.3: '+location.protocol+' / '+navigator.userAgent);
+status(rows.length?'前回の結果を復元しました。新しい音声は選択できます。開始前に既存の結果を保存してクリアしてください。':'準備完了。音声ファイルを選択してください。');
+</script>
+</body>
+</html>
