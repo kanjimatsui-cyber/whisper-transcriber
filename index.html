@@ -106,7 +106,7 @@ textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;o
 <main>
 <header>
   <h1>音声文字起こし</h1>
-  <p class="muted">Safari 対応版 <strong id="build">2.5.2-20261119-r1</strong> / OVZ語彙学習</p>
+  <p class="muted">Safari 対応版 <strong id="build">2.5.4-20261120-ovz-auto-test</strong> / OVZ語彙学習</p>
   <p class="muted">日本語・英語対応。音声は端末内で処理します。</p>
 </header>
 <section aria-labelledby="inputHeading">
@@ -163,6 +163,12 @@ textarea {display:block;width:100%;min-width:0;min-height:48px;resize:vertical;o
 <section id="vocabSection" aria-labelledby="vocabHeading">
   <h2 id="vocabHeading">OVZ語彙辞書（試験版）</h2>
   <p class="muted">ONE VOICE ZINEに掲載された表記を候補として参照します。辞書はWhisper本体を再学習しません。認識文は自動変更されず、候補を押した場合だけ修正します。</p>
+  <div class="actions" style="margin:12px 0;align-items:center;flex-wrap:wrap">
+    <label style="display:flex;align-items:center;gap:8px"><input type="checkbox" id="autoVocabEnabled"> 学習済み対応を新しい認識結果に自動適用（試験版・初期OFF）</label>
+    <button type="button" id="autoVocabExisting">現在の結果に一括適用</button>
+    <button type="button" id="autoVocabUndo" disabled>直前の一括適用を元に戻す</button>
+  </div>
+  <p id="autoVocabStatus" class="muted" role="status">自動置換は登録済みの誤認識 → 正式表記の対応のみ使用します。未確認候補は対象外です。</p>
   <div class="summary"><span>サイト由来の候補 <strong id="vocabCount">0</strong> 件</span><span>学習済みの対応 <strong id="learnCount">0</strong> 件</span></div>
   <div class="actions">
     <button id="ovzUpdate" type="button">OVZ公開記事から更新</button>
@@ -491,7 +497,7 @@ return {run};
 'use strict';
 const $=id=>document.getElementById(id);
 const KEY='local-whisper-transcript-v1';
-const BUILD='2.5.2-20261119-r1';
+const BUILD='2.5.4-20261120-ovz-auto-test';
 
 // OVZ vocabulary seed from public repository metadata and four interview article bodies.
 // These are *published strings*, NOT validated pronunciations / alias pairs.
@@ -500,6 +506,7 @@ const VOCAB_KEY='ovz-transcriber-vocab-v25';
 const MAX_VOCAB_IMPORTED=8500;
 const GITHUB_RAW='https://raw.githubusercontent.com/kanjimatsui-cyber/one-voice-zine/main/';
 let vocabImported=[], vocabCorrections=[], vocabSaving=true;
+let autoVocabUndoSnapshot=null;
 function normTerm(t){return String(t||'').normalize('NFKC').trim().toLocaleLowerCase();}
 function validTerm(t,limit=100){return typeof t==='string'&&t.trim().length>=2&&t.length<=limit&&!/[\r\n\t]/.test(t);}
 function catalog(){
@@ -571,6 +578,32 @@ function locateVariant(hay,needle){
    return idx;
  }return -1;
 }
+function autoReplaceLearned(input){
+ let text=String(input),changes=[];
+ const rules=[...vocabCorrections].sort((a,b)=>b.variant.length-a.variant.length);
+ for(const rule of rules){
+   let cursor=0,limit=0;
+   while(cursor<text.length&&limit<50){
+     const pos=locateVariant(text.slice(cursor),rule.variant);
+     if(pos<0)break;
+     const at=cursor+pos;
+     text=text.slice(0,at)+rule.correct+text.slice(at+rule.variant.length);
+     changes.push({before:rule.variant,after:rule.correct,source:'学習済み・自動置換'});
+     cursor=at+rule.correct.length;limit++;
+   }
+ }
+ return {text,changes};
+}
+function autoApplyRow(row){
+ if(!vocabCorrections.length)return 0;
+ const result=autoReplaceLearned(row.text);
+ if(!result.changes.length)return 0;
+ row.asrText??=row.text;
+ row.text=result.text;
+ row.vocabApplied=[...(row.vocabApplied||[]),...result.changes];
+ return result.changes.length;
+}
+function autoStatus(msg){$('autoVocabStatus').textContent=msg;}
 function vocabHints(text){
  return vocabCorrections.filter(c=>locateVariant(text,c.variant)>=0).slice(0,8);
 }
@@ -893,7 +926,8 @@ function save(){
   $('saveState').textContent=storageOK?'自動保存：端末内に保存済み':'自動保存できません。ファイルとして保存してください。';
 }
 function scheduleSave(){clearTimeout(saveTimer);saveTimer=setTimeout(save,250);}
-function addRow(row){
+function addRow(row,fromRestore=false){
+  if(!fromRestore&&$('autoVocabEnabled').checked)autoApplyRow(row);
   rows.push(row);
   const entry=document.createElement('div');entry.className='entry';
   const meta=document.createElement('div');meta.className='meta';
@@ -917,7 +951,7 @@ function restore(){
     const data=JSON.parse(localStorage.getItem(KEY)||'null');
     if(data&&Array.isArray(data.rows)){
       sourceName=typeof data.sourceName==='string'?data.sourceName:'';
-      for(const r of data.rows){if(r&&Number.isFinite(r.start)&&Number.isFinite(r.end)&&r.start>=0&&r.end>=r.start&&typeof r.text==='string'&&['JA','EN'].includes(r.lang))addRow(r);}
+      for(const r of data.rows){if(r&&Number.isFinite(r.start)&&Number.isFinite(r.end)&&r.start>=0&&r.end>=r.start&&typeof r.text==='string'&&['JA','EN'].includes(r.lang))addRow(r,true);}
     }
     $('saveState').textContent=rows.length?'自動保存：前回の結果を復元しました':'自動保存：有効';
   }catch{storageOK=false;$('saveState').textContent='保存済みデータを読み込めません。ファイル保存をご利用ください。';}
@@ -1108,6 +1142,33 @@ for(const b of exportButtons)b.addEventListener('click',async()=>{
   }else download(f,text);
 });
 window.addEventListener('pagehide',()=>{if(saveTimer!==null)save();});
+$('autoVocabEnabled').addEventListener('change',()=>{
+ autoStatus($('autoVocabEnabled').checked?'試験モードON：次の新規認識結果から、学習済み対応のみ自動適用します。':'試験モードOFF：新規認識結果は自動置換しません。');
+});
+$('autoVocabExisting').addEventListener('click',()=>{
+ if(active){autoStatus('文字起こし完了後に実行してください。');return;}
+ if(!rows.length){autoStatus('文字起こし結果がありません。');return;}
+ if(!vocabCorrections.length){autoStatus('学習済みの対応がありません。まず誤認識と正しい表記を登録してください。');return;}
+ const preview=rows.map(r=>autoReplaceLearned(r.text));
+ const total=preview.reduce((n,r)=>n+r.changes.length,0);
+ if(!total){autoStatus('一致する誤認識はありませんでした。本文は変更していません。');return;}
+ if(!confirm('学習済みの対応で '+total+' 箇所を自動置換します。実行しますか？'))return;
+ autoVocabUndoSnapshot=rows.map(r=>({text:r.text,asrText:r.asrText,vocabApplied:Array.isArray(r.vocabApplied)?r.vocabApplied.map(x=>({...x})):null}));
+ rows.forEach(r=>autoApplyRow(r));
+ for(const [i,entry] of [...log.querySelectorAll('.entry')].entries()){
+   if(!rows[i])continue;const area=entry.querySelector('textarea');area.value=rows[i].text;renderHintUI(rows[i],entry,area);
+ }
+ $('autoVocabUndo').disabled=false;stats();save();autoStatus(total+' 箇所を自動置換しました。原音と照合し、誤りがあれば元に戻してください。');
+});
+$('autoVocabUndo').addEventListener('click',()=>{
+ if(!autoVocabUndoSnapshot||autoVocabUndoSnapshot.length!==rows.length){autoStatus('復元できません。結果の行数が変わっています。');return;}
+ rows.forEach((r,i)=>{const old=autoVocabUndoSnapshot[i];r.text=old.text;r.asrText=old.asrText;if(old.vocabApplied===null)delete r.vocabApplied;else r.vocabApplied=old.vocabApplied;});
+ autoVocabUndoSnapshot=null;$('autoVocabUndo').disabled=true;
+ for(const [i,entry] of [...log.querySelectorAll('.entry')].entries()){
+   if(!rows[i])continue;const area=entry.querySelector('textarea');area.value=rows[i].text;renderHintUI(rows[i],entry,area);
+ }
+ stats();save();autoStatus('一括置換前の結果に戻しました。');
+});
 $('copyTrace').addEventListener('click',async()=>{const ok=await copyText('BUILD '+BUILD+'\n'+traceLines.join('\n'));if(!ok)status('診断情報を選択してコピーしてください。');});
 vocabRestore();
 restore();
